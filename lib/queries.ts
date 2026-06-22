@@ -248,7 +248,11 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type Row = Record<string, any>;
-  const rows = data as Row[];
+  // Exclude non-cash transactions — grants and option exercises are corporate
+  // decisions, not discretionary purchases, so they don't belong in the signal feed.
+  const rows = (data as Row[]).filter(
+    (r) => !NON_CASH_TYPES.has((r.transaction_type as string | null) ?? "")
+  );
 
   // Group rows by company
   const byCompany = new Map<number, Row[]>();
@@ -334,7 +338,11 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
     }
   }
 
+  // Drop clusters where we couldn't determine any value — these are parsing
+  // failures (price/qty = 0 but not classified as grants) and not real signals.
+  const meaningful = signals.filter((s) => s.total_value > 0);
+
   // Most recent clusters first
-  signals.sort((a, b) => b.window_end.localeCompare(a.window_end));
-  return signals;
+  meaningful.sort((a, b) => b.window_end.localeCompare(a.window_end));
+  return meaningful;
 }
