@@ -38,5 +38,8 @@ class ParsedTransaction:
     # Insider verification (Phase 4)
     insider_verified: bool = True    # False if entity name or non-PDMR role detected
     role_category: str = "other"     # executive | board | major_shareholder | related_person | other
+    # Transaction classification (Phase 1)
+    transaction_type: str = "buy"   # buy | sell | grant | option_exercise | sell_to_cover | other
+    needs_review: bool = False       # True when direction/type could not be determined
     # Parser quality
     parse_warnings: list[str] = field(default_factory=list)

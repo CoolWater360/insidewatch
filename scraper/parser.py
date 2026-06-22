@@ -34,19 +34,48 @@ from .models import ParsedTransaction
 
 logger = logging.getLogger(__name__)
 
-# ─── Direction lookup ────────────────────────────────────────────────────────
-# Italian and English terms that appear in Section 4b.
-_DIRECTION_MAP = {
-    "ACQUISTO": "buy",
-    "PURCHASE": "buy",
-    "SOTTOSCRIZIONE": "buy",       # subscription (new shares)
-    "ESERCIZIO": "buy",            # exercise of options/warrants
-    "ASSEGNAZIONE": "buy",         # award (free share grants)
-    "CESSIONE": "sell",
-    "VENDITA": "sell",
-    "SALE": "sell",
-    "TRASFERIMENTO": "sell",       # transfer (treated as sell for flagging)
+# ─── Direction + transaction-type lookup ─────────────────────────────────────
+# Maps keyword → (direction, transaction_type).
+# direction:        buy | sell | unknown
+# transaction_type: buy | sell | grant | option_exercise | sell_to_cover | other
+_DIRECTION_MAP: dict[str, tuple[str, str]] = {
+    "ACQUISTO":       ("buy",  "buy"),
+    "PURCHASE":       ("buy",  "buy"),
+    "SOTTOSCRIZIONE": ("buy",  "buy"),            # subscription (new shares)
+    "ASSEGNAZIONE":   ("buy",  "grant"),          # free share assignment
+    "ATTRIBUZIONE":   ("buy",  "grant"),          # free share attribution
+    "ASSIGNMENT":     ("buy",  "grant"),
+    "ESERCIZIO":      ("buy",  "option_exercise"),# option / warrant exercise
+    "EXERCISE":       ("buy",  "option_exercise"),
+    "CESSIONE":       ("sell", "sell"),
+    "VENDITA":        ("sell", "sell"),
+    "SALE":           ("sell", "sell"),
+    "TRASFERIMENTO":  ("sell", "sell"),           # transfer
+    "DONAZIONE":      ("sell", "sell"),           # donation
+    "PERMUTA":        ("sell", "sell"),           # exchange
+    "SUCCESSIONE":    ("buy",  "other"),          # inheritance
 }
+
+
+# ─── Two-column degarbler ────────────────────────────────────────────────────
+
+def _degarble(text: str) -> str:
+    """
+    Recover text garbled by two-column PDF character interleaving.
+
+    Layout 2 PDFs have Italian text in the left column and English in the right
+    column side-by-side. pdfplumber reads across rows and interleaves chars:
+        ALTRO/OTHER → "A U L N T D R E O R"
+    Taking every other character (even indices) recovers the Italian word:
+        AULNTDREOR → A(0) L(2) T(4) R(6) O(8) = ALTRO ✓
+    Only applied to runs of 5+ space-separated single uppercase chars,
+    so normal text is not affected.
+    """
+    def _fix(m: re.Match) -> str:
+        chars = re.sub(r"\s", "", m.group(0))
+        return chars[::2]  # even-index chars = Italian column
+
+    return re.sub(r"(?:[A-Z0-9/,\.–-] ){5,}[A-Z0-9/,\.–-]", _fix, text)
 
 
 # ─── Number parsing ──────────────────────────────────────────────────────────
@@ -216,25 +245,71 @@ def _parse_instrument_type(tx_block: str) -> str:
     return "Unknown"
 
 
-def _parse_direction(tx_block: str) -> tuple[str, list[str]]:
+def _parse_direction(tx_block: str) -> tuple[str, str, list[str]]:
+    """
+    Return (direction, transaction_type, warnings).
+
+    Strategy:
+      1. Isolate section 4b to avoid false matches in bilingual footnotes.
+      2. Degarble in case of two-column interleaving (Layout 2).
+      3. Match keyword map → (direction, transaction_type).
+      4. If "Altro/Other", inspect the description text for sub-type keywords.
+      5. If linked to share option programme (SI/YES) → option_exercise.
+      6. Fall back to unknown/other + flag needs_review.
+    """
     warnings: list[str] = []
+    direction = "unknown"
+    tx_type = "other"
 
-    # Strategy 1: extract just the section 4b area to avoid false matches.
-    # Layout 1 has the direction word alone on its own line between the label
-    # and the "A norma..." regulatory footnote.
-    # Layout 2 has it inline: "Nature of the ACQUISTO/PURCHASE".
     section_4b = _extract_section_4b(tx_block)
-    target = section_4b if section_4b else tx_block
+    target_raw = section_4b if section_4b else tx_block
+    target = _degarble(target_raw)
 
-    # Within the isolated section 4b text we can safely use IGNORECASE:
-    # we've already filtered out the explanatory body text that contained
-    # lowercase "acquisto, vendita" etc. in mid-sentence context.
-    for term, direction in _DIRECTION_MAP.items():
+    # ── Step 1: direct keyword match ─────────────────────────────────────────
+    for term, (d, t) in _DIRECTION_MAP.items():
         if re.search(r"\b" + term + r"\b", target, re.IGNORECASE):
-            return direction, warnings
+            return d, t, warnings
 
-    warnings.append("Could not determine transaction direction (buy/sell)")
-    return "unknown", warnings
+    # ── Step 2: "Altro / Other" with description ──────────────────────────────
+    # The filing uses "Altro/Other" as the top-level label and puts the real
+    # nature in the description text that follows. Parse that description.
+    altro_m = re.search(
+        r"[Aa]ltro\s*/?\s*[Oo]ther\s*[-–—]?\s*(.{0,400})",
+        target,
+        re.DOTALL,
+    )
+    if altro_m:
+        desc = altro_m.group(1).upper()
+        if any(k in desc for k in ("ASSEGNAZIONE", "ATTRIBUZIONE", "GRATUITO", "AWARD", "ATTRIBUTION")):
+            if "VENDITA" in desc or "SELL" in desc or "COPERTURA" in desc or "COVER" in desc:
+                # Sell-to-cover: selling free shares to cover tax liability
+                direction, tx_type = "sell", "sell_to_cover"
+            else:
+                direction, tx_type = "buy", "grant"
+        elif any(k in desc for k in ("ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT")):
+            direction, tx_type = "buy", "option_exercise"
+        elif any(k in desc for k in ("VENDITA", "CESSIONE", "SELL", "SALE")):
+            direction, tx_type = "sell", "sell"
+        elif any(k in desc for k in ("ACQUISTO", "PURCHASE", "ACQUIS")):
+            direction, tx_type = "buy", "buy"
+        else:
+            # Altro with unrecognised description — keep unknown but note it
+            warnings.append(f"Altro/Other with unrecognised description: {desc[:80]}")
+
+        if direction != "unknown":
+            return direction, tx_type, warnings
+
+    # ── Step 3: option programme SI/YES signal ────────────────────────────────
+    # The form asks "is this transaction linked to a share option programme?"
+    # If answered SI/YES and we still haven't found a direction, it is an exercise.
+    if re.search(r"\bSI\b|\bYES\b", tx_block) and re.search(
+        r"opzion|option programme|programma.*opzion", tx_block, re.IGNORECASE
+    ):
+        warnings.append("Direction inferred from option programme SI/YES flag")
+        return "buy", "option_exercise", warnings
+
+    warnings.append("Could not determine transaction direction — flagged for review")
+    return "unknown", "other", warnings
 
 
 def _extract_section_4b(tx_block: str) -> Optional[str]:
@@ -471,7 +546,7 @@ def parse_pdf(
         try:
             isin = _parse_isin(block)
             instrument_type = _parse_instrument_type(block)
-            direction, dir_warns = _parse_direction(block)
+            direction, transaction_type, dir_warns = _parse_direction(block)
             quantity, unit_price, currency, pv_warns = _parse_price_volume(block)
             tx_date, date_warns = _parse_transaction_date(block)
 
@@ -487,6 +562,12 @@ def parse_pdf(
                 total_value = quantity * (unit_price / 100.0)
             else:
                 total_value = quantity * unit_price
+
+            # Refine transaction_type for zero-price rows that did get a direction
+            if unit_price == 0 and total_value == 0 and transaction_type == "buy":
+                transaction_type = "grant"
+
+            needs_review = direction == "unknown"
 
             raw_hash = _compute_hash(
                 insider_name or "",
@@ -513,6 +594,8 @@ def parse_pdf(
                 raw_hash=raw_hash,
                 insider_verified=assessment["verified"],
                 role_category=assessment["role_category"],
+                transaction_type=transaction_type,
+                needs_review=needs_review,
                 parse_warnings=all_warnings,
             ))
 

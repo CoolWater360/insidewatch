@@ -29,12 +29,23 @@ function SortLink({
   );
 }
 
-function ValueCell({ total, currency }: { total: number; currency: string }) {
+const ZERO_LABEL: Record<string, string> = {
+  grant:           "assegnazione",
+  option_exercise: "esercizio op.",
+  sell_to_cover:   "sell-to-cover",
+};
+
+function ValueCell({
+  total, currency, txType,
+}: {
+  total: number; currency: string; txType?: string | null;
+}) {
   if (total === 0) {
+    const sub = (txType && ZERO_LABEL[txType]) ?? "non-cash";
     return (
       <span className="inline-flex flex-col items-end gap-0.5">
         <span className="text-xs font-medium text-muted">—</span>
-        <span className="text-[10px] leading-none text-muted/60">non-cash</span>
+        <span className="text-[10px] leading-none text-muted/60">{sub}</span>
       </span>
     );
   }
@@ -145,7 +156,11 @@ export function TransactionTable({ rows, current, basePath }: Props) {
               </td>
               {/* Type badge — always visible */}
               <td className="px-4 py-2.5">
-                <DirectionBadge direction={tx.direction} />
+                <DirectionBadge
+                  direction={tx.direction}
+                  transactionType={tx.transaction_type}
+                  needsReview={tx.needs_review}
+                />
               </td>
               <td className="hidden px-4 py-2.5 text-right tabular-nums text-muted md:table-cell">
                 {formatNumber(tx.quantity)}
@@ -155,7 +170,7 @@ export function TransactionTable({ rows, current, basePath }: Props) {
               </td>
               {/* Value — always visible */}
               <td className="px-4 py-2.5 text-right">
-                <ValueCell total={tx.total_value} currency={tx.currency} />
+                <ValueCell total={tx.total_value} currency={tx.currency} txType={tx.transaction_type} />
               </td>
               {/* PDF — desktop only */}
               <td className="hidden px-4 py-2.5 text-right sm:table-cell">

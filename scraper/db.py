@@ -160,6 +160,8 @@ def upsert_transaction(
     source_url: str,
     insider_verified: bool = True,
     role_category: str = "other",
+    transaction_type: str = "buy",
+    needs_review: bool = False,
 ) -> dict:
     """
     Insert or skip a transaction based on raw_hash deduplication.
@@ -193,6 +195,8 @@ def upsert_transaction(
             "currency": currency,
             "source_url": source_url,
             "raw_hash": raw_hash,
+            "transaction_type": transaction_type,
+            "needs_review": needs_review,
         }).execute()
 
         return {

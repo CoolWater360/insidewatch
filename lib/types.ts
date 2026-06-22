@@ -16,6 +16,14 @@ export interface Insider {
   company_id: number;
 }
 
+export type TransactionType =
+  | "buy"
+  | "sell"
+  | "grant"
+  | "option_exercise"
+  | "sell_to_cover"
+  | "other";
+
 export interface Transaction {
   id: number;
   insider_id: number;
@@ -23,6 +31,8 @@ export interface Transaction {
   transaction_date: string; // YYYY-MM-DD
   filed_date: string | null;
   direction: Direction;
+  transaction_type: TransactionType | null;
+  needs_review: boolean | null;
   instrument_type: string | null;
   isin: string | null;
   quantity: number;

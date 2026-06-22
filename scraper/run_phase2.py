@@ -106,6 +106,8 @@ def _crawl_company(
                     source_url=tx.source_url,
                     insider_verified=tx.insider_verified,
                     role_category=tx.role_category,
+                    transaction_type=tx.transaction_type,
+                    needs_review=tx.needs_review,
                 )
                 if result["inserted"]:
                     stats["inserted"] += 1
