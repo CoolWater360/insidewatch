@@ -273,10 +273,11 @@ def _parse_direction(tx_block: str) -> tuple[str, str, list[str]]:
     # ── Step 2: "Altro / Other" with description ──────────────────────────────
     # The filing uses "Altro/Other" as the top-level label and puts the real
     # nature in the description text that follows. Parse that description.
+    # Use IGNORECASE so degarbled "ALTRO" (all-caps) is also matched.
     altro_m = re.search(
-        r"[Aa]ltro\s*/?\s*[Oo]ther\s*[-–—]?\s*(.{0,400})",
+        r"altro\s*/?\s*other\s*[-–—]?\s*(.{0,400})",
         target,
-        re.DOTALL,
+        re.DOTALL | re.IGNORECASE,
     )
     if altro_m:
         desc = altro_m.group(1).upper()
@@ -301,11 +302,13 @@ def _parse_direction(tx_block: str) -> tuple[str, str, list[str]]:
 
     # ── Step 3: option programme SI/YES signal ────────────────────────────────
     # The form asks "is this transaction linked to a share option programme?"
-    # If answered SI/YES and we still haven't found a direction, it is an exercise.
+    # If answered SI/YES and we still haven't found a direction, it is probably
+    # an option exercise — but sell-to-cover transactions (which arise from the
+    # same plan) also answer SI/YES.  Mark as needs_review so no alert fires.
     if re.search(r"\bSI\b|\bYES\b", tx_block) and re.search(
         r"opzion|option programme|programma.*opzion", tx_block, re.IGNORECASE
     ):
-        warnings.append("Direction inferred from option programme SI/YES flag")
+        warnings.append("Direction inferred from option programme SI/YES flag — needs_review")
         return "buy", "option_exercise", warnings
 
     warnings.append("Could not determine transaction direction — flagged for review")
@@ -563,11 +566,13 @@ def parse_pdf(
             else:
                 total_value = quantity * unit_price
 
-            # Refine transaction_type for zero-price rows that did get a direction
-            if unit_price == 0 and total_value == 0 and transaction_type == "buy":
+            # Zero-price rows are non-cash grants regardless of direction detection
+            if unit_price == 0 and total_value == 0 and quantity > 0:
                 transaction_type = "grant"
 
-            needs_review = direction == "unknown"
+            # needs_review: unresolved direction, OR direction was a weak SI/YES guess
+            si_yes_fallback = any("SI/YES flag" in w for w in dir_warns)
+            needs_review = (direction == "unknown" and transaction_type != "grant") or si_yes_fallback
 
             raw_hash = _compute_hash(
                 insider_name or "",

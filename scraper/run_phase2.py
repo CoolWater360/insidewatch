@@ -22,6 +22,7 @@ from datetime import datetime
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEED_CSV = os.path.join(_PROJECT_ROOT, "db", "seed_companies.csv")
 
+from .alerts import AlertPayload, dispatch
 from .db import get_supabase_client, load_seed_companies, upsert_transaction
 from .fetcher import BlockedError, _make_session, iter_company_listings, download_pdf
 from .parser import parse_pdf
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 def _crawl_company(
     company_name: str,
+    company_tier: int,
     client,
     polite_delay: float,
     max_pdfs: int,
@@ -111,6 +113,31 @@ def _crawl_company(
                 )
                 if result["inserted"]:
                     stats["inserted"] += 1
+                    # Fire alert for verified, non-review Tier 1/2 transactions
+                    if tx.insider_verified and not tx.needs_review and result["company_id"]:
+                        try:
+                            dispatch(
+                                AlertPayload(
+                                    company_name=tx.company_name,
+                                    company_id=result["company_id"],
+                                    insider_name=tx.insider_name,
+                                    insider_role=tx.role,
+                                    direction=tx.direction,
+                                    transaction_type=tx.transaction_type,
+                                    quantity=tx.quantity,
+                                    unit_price=tx.unit_price,
+                                    total_value=tx.total_value,
+                                    currency=tx.currency,
+                                    transaction_date=tx.transaction_date,
+                                    filed_date=tx.filing_date,
+                                    source_url=tx.source_url,
+                                    transaction_id=result["transaction_id"],
+                                ),
+                                client=client,
+                                company_tier=company_tier,
+                            )
+                        except Exception as alert_exc:
+                            logger.warning("Alert dispatch error: %s", alert_exc)
                 else:
                     stats["dedup"] += 1
 
@@ -161,7 +188,7 @@ def run_crawl(
 
     companies_query = (
         client.table("companies")
-        .select("name")
+        .select("name, priority_tier")
         .lte("priority_tier", max_tier)
         .order("priority_tier")
         .order("name")
@@ -171,9 +198,13 @@ def run_crawl(
         logger.error("No companies found for tier <= %d", max_tier)
         return {}
 
-    all_companies = [c["name"] for c in companies_query.data]
+    all_companies = [
+        (c["name"], c.get("priority_tier", 3)) for c in companies_query.data
+    ]
     if company_filter:
-        all_companies = [c for c in all_companies if company_filter.lower() in c.lower()]
+        all_companies = [
+            (n, t) for n, t in all_companies if company_filter.lower() in n.lower()
+        ]
     if limit:
         all_companies = all_companies[:limit]
 
@@ -196,8 +227,8 @@ def run_crawl(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_name = {
-            executor.submit(_crawl_company, name, client, polite_delay, max_pdfs_per_company): name
-            for name in all_companies
+            executor.submit(_crawl_company, name, tier, client, polite_delay, max_pdfs_per_company): name
+            for name, tier in all_companies
         }
 
         for future in as_completed(future_to_name):

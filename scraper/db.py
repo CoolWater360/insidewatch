@@ -175,6 +175,8 @@ def upsert_transaction(
             return {
                 "inserted": False,
                 "transaction_id": existing.data[0]["id"],
+                "company_id": None,
+                "insider_id": None,
                 "message": f"Transaction already exists (hash: {raw_hash[:16]}…)",
             }
 
@@ -202,6 +204,8 @@ def upsert_transaction(
         return {
             "inserted": True,
             "transaction_id": tx.data[0]["id"],
+            "company_id": company_id,
+            "insider_id": insider_id,
             "message": f"Inserted transaction {tx.data[0]['id']}",
         }
 
