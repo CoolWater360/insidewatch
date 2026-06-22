@@ -21,7 +21,7 @@ jobs:
   scrape:
     name: Scrape (tier ${{ github.event.inputs.tier || 'auto' }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -37,17 +37,27 @@ jobs:
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt
 
-      - name: Determine tier
+      - name: Determine tier and flags
         id: tier
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "max_tier=${{ github.event.inputs.tier }}" >> "$GITHUB_OUTPUT"
+            TIER="${{ github.event.inputs.tier }}"
           elif [[ "${{ github.event.schedule }}" == "0 7,12,17 * * 1-5" ]]; then
-            echo "max_tier=3" >> "$GITHUB_OUTPUT"
+            TIER="3"
           elif [[ "${{ github.event.schedule }}" == "0 8-17 * * 1-5" ]]; then
-            echo "max_tier=2" >> "$GITHUB_OUTPUT"
+            TIER="2"
           else
-            echo "max_tier=1" >> "$GITHUB_OUTPUT"
+            TIER="1"
+          fi
+          echo "max_tier=$TIER" >> "$GITHUB_OUTPUT"
+          # Tier 1: fast (1s delay, 3 concurrent workers) to finish in <10 min
+          # Tier 2/3: polite (2s delay, 1 worker) — fewer runs, less pressure
+          if [[ "$TIER" == "1" ]]; then
+            echo "delay=1.0" >> "$GITHUB_OUTPUT"
+            echo "workers=3" >> "$GITHUB_OUTPUT"
+          else
+            echo "delay=2.0" >> "$GITHUB_OUTPUT"
+            echo "workers=1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run scraper
@@ -57,5 +67,6 @@ jobs:
         run: |
           python3 -m scraper.run_phase2 \
             --tier ${{ steps.tier.outputs.max_tier }} \
-            --delay 2.5 \
+            --delay ${{ steps.tier.outputs.delay }} \
+            --workers ${{ steps.tier.outputs.workers }} \
             --max-pdfs 15
