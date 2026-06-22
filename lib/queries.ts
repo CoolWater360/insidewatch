@@ -69,7 +69,10 @@ export async function getTransactions(
 
   let query = supabase
     .from("transactions")
-    .select(SELECT_WITH_RELATIONS, { count: "exact" });
+    .select(SELECT_WITH_RELATIONS, { count: "exact" })
+    // Exclude non-cash corporate awards — not discretionary market transactions
+    .neq("transaction_type", "grant")
+    .neq("transaction_type", "option_exercise");
 
   if (filters.companyId) query = query.eq("company_id", filters.companyId);
   if (filters.direction) query = query.eq("direction", filters.direction);

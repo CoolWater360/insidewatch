@@ -116,21 +116,26 @@ def extract_text(pdf_bytes: bytes) -> str:
 def _parse_insider_name(text: str) -> tuple[Optional[str], list[str]]:
     warnings: list[str] = []
 
-    # Layout 1: "Nome: Paolo Cognome: Zambelli" (separate first/last)
-    m = re.search(r"Nome:\s+(\S+)\s+Cognome:\s+(\S+)", text)
+    # Layout 1: "Nome: Paolo Cognome: Zambelli"
+    # Bug fix: original used \S+ for surname, truncating multi-word surnames
+    # like "Dal Bo", "De Nora", "Di Palma". Capture the full rest of the line.
+    m = re.search(r"Nome:\s+(\S+)\s+Cognome:\s+([^\n]+?)(?:\n|$)", text)
     if m:
-        return f"{m.group(1)} {m.group(2)}", warnings
+        first = m.group(1).strip()
+        last = " ".join(m.group(2).split())  # collapse internal whitespace
+        return f"{first} {last}", warnings
 
     # Layout 2: "a) Nome/First Name EMMA MARCEGAGLIA"
-    # The name is everything after the label on the same line.
-    m = re.search(r"Nome/First\s+Name\s+([A-Z][A-Z\s]+?)(?:\n|$)", text)
+    # Apply degarble first — two-column PDFs interleave chars so
+    # "EMMA MARCEGAGLIA" may arrive as "E M M A  M A R C E G A G L I A".
+    degarbled = _degarble(text)
+    m = re.search(r"Nome/First\s+Name\s+([A-Z][A-Z\s\-\']{2,80}?)(?:\n|$)", degarbled)
     if m:
-        return m.group(1).strip(), warnings
+        return " ".join(m.group(1).split()), warnings
 
     # Layout 3 (compact 2016/523 form): "a) Nome Massimo Guerra"
     # Only look in section 1 (before section 3 "a) Nome COMPANY").
     section1 = text.split("Dati relativi all")[1] if "Dati relativi all" in text else text
-    # After splitting, the first "a) Nome" is always the person.
     m = re.search(r"a\)\s+Nome\s+([A-Z][a-zA-Z\s\.]+?)(?:\n|$)", section1)
     if m:
         return m.group(1).strip(), warnings
@@ -540,6 +545,15 @@ def parse_pdf(
         insider_name = normalize_name(insider_name)
     assessment = assess_insider(insider_name or "", role)
 
+    # Detect likely-truncated names: single word (no space) that isn't "Unknown"
+    name_truncated = bool(
+        insider_name
+        and insider_name != "Unknown"
+        and " " not in insider_name
+    )
+    if name_truncated:
+        name_warns.append(f"Insider name looks truncated (single word): '{insider_name}'")
+
     results: list[ParsedTransaction] = []
 
     for i, block in enumerate(tx_blocks):
@@ -570,9 +584,13 @@ def parse_pdf(
             if unit_price == 0 and total_value == 0 and quantity > 0:
                 transaction_type = "grant"
 
-            # needs_review: unresolved direction, OR direction was a weak SI/YES guess
+            # needs_review: unresolved direction, weak SI/YES guess, or truncated name
             si_yes_fallback = any("SI/YES flag" in w for w in dir_warns)
-            needs_review = (direction == "unknown" and transaction_type != "grant") or si_yes_fallback
+            needs_review = (
+                (direction == "unknown" and transaction_type != "grant")
+                or si_yes_fallback
+                or name_truncated
+            )
 
             raw_hash = _compute_hash(
                 insider_name or "",

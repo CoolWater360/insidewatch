@@ -63,6 +63,11 @@ function ValueCell({
   );
 }
 
+function insiderDisplay(name: string | null | undefined, lang: "it" | "en"): string {
+  if (!name || name === "Unknown") return lang === "it" ? "Nome non disp." : "Name unavailable";
+  return name;
+}
+
 export function TransactionTable({ rows, current, basePath, lang = "it" }: Props) {
   const t = (it: string, en: string) => lang === "it" ? it : en;
 
@@ -143,7 +148,7 @@ export function TransactionTable({ rows, current, basePath, lang = "it" }: Props
                   ) : "—"}
                 </div>
                 <div className="mt-0.5 text-xs text-muted">
-                  {tx.insiders?.full_name ?? "—"}
+                  {insiderDisplay(tx.insiders?.full_name, lang)}
                 </div>
                 <div className="mt-0.5 text-[11px] tabular-nums text-muted/60">
                   {formatDate(tx.transaction_date, lang)}
@@ -164,7 +169,7 @@ export function TransactionTable({ rows, current, basePath, lang = "it" }: Props
                 ) : "—"}
               </td>
               <td className="hidden px-4 py-2.5 text-[#E8EDF7] sm:table-cell">
-                {tx.insiders?.full_name ?? "—"}
+                {insiderDisplay(tx.insiders?.full_name, lang)}
               </td>
               <td className="hidden max-w-[14rem] truncate px-4 py-2.5 text-xs text-muted lg:table-cell"
                   title={tx.insiders?.role ?? ""}>

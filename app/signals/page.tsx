@@ -95,7 +95,11 @@ export default async function SignalsPage() {
                   <tbody className="divide-y divide-white/[0.04]">
                     {sig.insiders.map((ins, j) => (
                       <tr key={j}>
-                        <td className="py-1.5 pr-4 font-medium text-[#E8EDF7]">{ins.name}</td>
+                        <td className="py-1.5 pr-4 font-medium text-[#E8EDF7]">
+                          {ins.name === "Unknown"
+                            ? <span className="text-muted/60 italic">{t("Nome non disp.", "Name unavailable")}</span>
+                            : ins.name}
+                        </td>
                         <td className="hidden py-1.5 pr-4 text-muted sm:table-cell">{ins.role ?? "—"}</td>
                         <td className="py-1.5 pr-4 text-muted">{formatDate(ins.date, lang)}</td>
                         <td className="hidden py-1.5 pr-4 text-right tabular-nums text-muted sm:table-cell">
