@@ -7,6 +7,8 @@ import { ConfigNotice } from "@/components/ConfigNotice";
 
 export const dynamic = "force-dynamic";
 
+const NON_CASH_TYPES = new Set(["grant", "option_exercise", "sell_to_cover"]);
+
 export default async function SignalsPage() {
   if (!isSupabaseConfigured) return <ConfigNotice />;
 
@@ -44,9 +46,42 @@ export default async function SignalsPage() {
       ) : (
         <div className="space-y-3">
           {signals.map((sig, idx) => {
-            const distinctInsiders = new Set(sig.insiders.map((i) => i.name)).size;
+            const distinctInsiders = sig.insiders.length;
+            const isAllNonCash = sig.cash_value === 0 && sig.total_value === 0;
+            const isMixed = sig.cash_value === 0 && sig.insiders.some(
+              i => !NON_CASH_TYPES.has(i.transaction_type ?? "")
+            );
+
+            // Label for the value badge
+            let valueBadge: React.ReactNode;
+            if (sig.cash_value > 0) {
+              valueBadge = (
+                <span className="rounded-lg border border-signal/30 bg-signal/10 px-3 py-1 text-sm font-bold tabular-nums text-signal">
+                  {formatCurrency(sig.cash_value)}
+                </span>
+              );
+            } else if (isAllNonCash) {
+              const label = sig.insiders.every(i => i.transaction_type === "grant")
+                ? t("Assegnazione stock award", "Stock award grant")
+                : sig.insiders.every(i => i.transaction_type === "option_exercise")
+                ? t("Esercizio opzioni", "Option exercise")
+                : t("Non-cash", "Non-cash");
+              valueBadge = (
+                <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-1 text-sm font-semibold text-muted">
+                  {label}
+                </span>
+              );
+            } else {
+              valueBadge = (
+                <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-1 text-sm font-semibold text-muted">
+                  {t("Misto (vedi dettaglio)", "Mixed (see detail)")}
+                </span>
+              );
+            }
+
             return (
               <div key={`${sig.company_id}-${sig.window_start}-${idx}`} className="glass-card-signal rounded-xl p-5">
+                {/* Card header */}
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <Link
@@ -60,15 +95,22 @@ export default async function SignalsPage() {
                       {sig.window_start !== sig.window_end ? ` – ${formatDate(sig.window_end, lang)}` : ""}
                       <span className="mx-1 opacity-40">·</span>
                       <span className="font-medium text-signal">
-                        {sig.insiders.length} {t("acquisti", "buys")} · {distinctInsiders} {t("insider", "insiders")}
+                        {sig.insiders.length} {t("operazioni", "buys")} · {distinctInsiders} {t("insider", "insiders")}
                       </span>
                     </p>
+                    {isAllNonCash && (
+                      <p className="mt-1 text-[11px] text-muted/70 italic">
+                        {t(
+                          "Piano di stock award — nessun acquisto in contanti",
+                          "Stock award plan — no cash purchases",
+                        )}
+                      </p>
+                    )}
                   </div>
-                  <span className="rounded-lg border border-signal/30 bg-signal/10 px-3 py-1 text-sm font-bold tabular-nums text-signal">
-                    {formatCurrency(sig.total_value)}
-                  </span>
+                  {valueBadge}
                 </div>
 
+                {/* Per-insider table */}
                 <div className="mt-4 overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
@@ -91,19 +133,35 @@ export default async function SignalsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/[0.04]">
-                      {sig.insiders.map((ins, j) => (
-                        <tr key={j}>
-                          <td className="py-1.5 pr-4 font-medium text-[#E8EDF7]">{ins.name}</td>
-                          <td className="hidden py-1.5 pr-4 text-muted sm:table-cell">{ins.role ?? "—"}</td>
-                          <td className="py-1.5 pr-4 text-muted">{formatDate(ins.date, lang)}</td>
-                          <td className="hidden py-1.5 pr-4 text-right tabular-nums text-muted sm:table-cell">
-                            {formatNumber(ins.quantity)}
-                          </td>
-                          <td className="py-1.5 text-right font-semibold tabular-nums text-[#E8EDF7]">
-                            {ins.total_value > 0 ? formatCurrency(ins.total_value) : "—"}
-                          </td>
-                        </tr>
-                      ))}
+                      {sig.insiders.map((ins, j) => {
+                        const isNonCash = NON_CASH_TYPES.has(ins.transaction_type ?? "");
+                        const typeLabel = ins.transaction_type === "grant"
+                          ? t("Assegnaz.", "Grant")
+                          : ins.transaction_type === "option_exercise"
+                          ? t("Opzioni", "Options")
+                          : null;
+                        return (
+                          <tr key={j}>
+                            <td className="py-1.5 pr-4 font-medium text-[#E8EDF7]">{ins.name}</td>
+                            <td className="hidden py-1.5 pr-4 text-muted sm:table-cell">{ins.role ?? "—"}</td>
+                            <td className="py-1.5 pr-4 text-muted">{formatDate(ins.date, lang)}</td>
+                            <td className="hidden py-1.5 pr-4 text-right tabular-nums text-muted sm:table-cell">
+                              {formatNumber(ins.quantity)}
+                            </td>
+                            <td className="py-1.5 text-right tabular-nums">
+                              {isNonCash ? (
+                                <span className="text-muted/60 text-[10px]">{typeLabel ?? "—"}</span>
+                              ) : ins.total_value > 0 ? (
+                                <span className="font-semibold text-[#E8EDF7]">
+                                  {formatCurrency(ins.total_value)}
+                                </span>
+                              ) : (
+                                <span className="text-muted/60">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

@@ -7,6 +7,8 @@ from typing import Optional
 import httpx
 from supabase import create_client, Client
 
+from .insiders import normalize_name
+
 logger = logging.getLogger(__name__)
 
 # 20-second timeout on every PostgREST call — prevents indefinite hangs.
@@ -108,6 +110,11 @@ def _resolve_insider(
     Find or create an insider row, returning its id.
     Handles concurrent-insert races via try/except + re-lookup.
     """
+    # Always normalize before any DB operation so stale ALL-CAPS records
+    # don't create new duplicates even if the caller forgot to normalize.
+    full_name = normalize_name(full_name)
+
+    # 1. Exact match (fast path — all names in DB are normalized post-migration)
     existing = (
         client.table("insiders")
         .select("id")
@@ -117,6 +124,17 @@ def _resolve_insider(
     )
     if existing.data:
         return existing.data[0]["id"]
+
+    # 2. Case-insensitive fallback (catches any stale non-normalized record)
+    ci_existing = (
+        client.table("insiders")
+        .select("id")
+        .ilike("full_name", full_name)
+        .eq("company_id", company_id)
+        .execute()
+    )
+    if ci_existing.data:
+        return ci_existing.data[0]["id"]
 
     try:
         ins = client.table("insiders").insert({

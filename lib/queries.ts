@@ -1,13 +1,24 @@
 import { getSupabase } from "./supabase";
 import { Company, Direction, TransactionWithRelations } from "./types";
 
+export interface ClusterInsider {
+  name: string;
+  role: string | null;
+  date: string;
+  quantity: number;
+  total_value: number;
+  transaction_type: string | null;
+}
+
 export interface ClusterSignal {
   company_id: number;
   company_name: string;
-  window_start: string; // earliest tx date in the cluster
-  window_end: string;   // latest tx date in the cluster
-  insiders: { name: string; role: string | null; date: string; quantity: number; total_value: number }[];
+  window_start: string;
+  window_end: string;
+  insiders: ClusterInsider[];
   total_value: number;
+  /** Sum of cash (non-grant, non-option) transactions only */
+  cash_value: number;
 }
 
 export interface TransactionFilters {
@@ -195,10 +206,21 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   };
 }
 
+const NON_CASH_TYPES = new Set(["grant", "option_exercise"]);
+
 /**
  * Cluster-buying signal: 2+ distinct insiders at the same company
- * with 'buy' transactions within a rolling 7-day window.
- * Looks back 90 days to keep the dataset manageable.
+ * with 'buy' (or grant/option_exercise) transactions within a rolling
+ * 7-day window. Looks back `lookbackDays` days.
+ *
+ * Algorithm: greedy left-to-right scan per company. Once a qualifying
+ * window is found, we advance past its last transaction before looking
+ * for the next cluster. This prevents the same event appearing as
+ * multiple overlapping windows.
+ *
+ * Within each window, insiders are deduplicated by lower-cased name so
+ * the same person (with slightly different capitalisation) never inflates
+ * the distinct-insider count.
  */
 export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSignal[]> {
   const supabase = getSupabase();
@@ -210,7 +232,10 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
 
   const { data, error } = await supabase
     .from("transactions")
-    .select("company_id, transaction_date, quantity, total_value, companies(id, name), insiders(full_name, role)")
+    .select(
+      "company_id, transaction_date, quantity, total_value, transaction_type," +
+      " companies(id, name), insiders(full_name, role)"
+    )
     .eq("direction", "buy")
     .gte("transaction_date", sinceStr)
     .order("company_id")
@@ -221,9 +246,13 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
     return [];
   }
 
-  // Group by company
-  const byCompany = new Map<number, typeof data>();
-  for (const row of data) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type Row = Record<string, any>;
+  const rows = data as Row[];
+
+  // Group rows by company
+  const byCompany = new Map<number, Row[]>();
+  for (const row of rows) {
     const cid = row.company_id as number;
     if (!byCompany.has(cid)) byCompany.set(cid, []);
     byCompany.get(cid)!.push(row);
@@ -231,56 +260,76 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
 
   const signals: ClusterSignal[] = [];
 
-  for (const [cid, rows] of byCompany) {
-    const sorted = [...rows].sort(
-      (a, b) => a.transaction_date.localeCompare(b.transaction_date)
+  for (const [cid, companyRows] of byCompany) {
+    const sorted = [...companyRows].sort(
+      (a, b) => (a.transaction_date as string).localeCompare(b.transaction_date as string)
     );
-    const companyInfo = (sorted[0].companies as unknown as { id: number; name: string } | null);
+    const companyInfo = sorted[0].companies as unknown as { id: number; name: string } | null;
     const companyName = companyInfo?.name ?? String(cid);
 
-    // Sliding window: for each tx i, find all tx j where date_j - date_i <= 7 days
-    // and count distinct insiders. Emit each unique cluster once (track by window_start).
-    const emitted = new Set<string>();
-
-    for (let i = 0; i < sorted.length; i++) {
+    let i = 0;
+    while (i < sorted.length) {
       const startDate = sorted[i].transaction_date as string;
       const startMs = new Date(startDate).getTime();
-      const windowTxs = [sorted[i]];
 
-      for (let j = i + 1; j < sorted.length; j++) {
+      // Collect all transactions within 7 days of window start
+      let j = i;
+      while (j < sorted.length) {
         const jMs = new Date(sorted[j].transaction_date as string).getTime();
-        if (jMs - startMs <= 7 * 86400_000) {
-          windowTxs.push(sorted[j]);
+        if (jMs - startMs <= 7 * 86400_000) j++;
+        else break;
+      }
+      const windowTxs = sorted.slice(i, j);
+
+      // Deduplicate insiders by normalised (lowercased) name.
+      // Multiple transactions by the same person are merged into one row.
+      const insiderMap = new Map<string, ClusterInsider>();
+      for (const tx of windowTxs) {
+        const ins = tx.insiders as unknown as { full_name: string; role: string | null } | null;
+        const rawName = ins?.full_name ?? "Unknown";
+        const key = rawName.toLowerCase().trim();
+        if (!insiderMap.has(key)) {
+          insiderMap.set(key, {
+            name: rawName,
+            role: ins?.role ?? null,
+            date: tx.transaction_date as string,
+            quantity: tx.quantity as number,
+            total_value: tx.total_value as number,
+            transaction_type: (tx as { transaction_type?: string | null }).transaction_type ?? null,
+          });
         } else {
-          break;
+          const existing = insiderMap.get(key)!;
+          insiderMap.set(key, {
+            ...existing,
+            quantity: existing.quantity + (tx.quantity as number),
+            total_value: existing.total_value + (tx.total_value as number),
+          });
         }
       }
 
-      // Distinct insider names
-      const distinctInsiders = new Set(
-        windowTxs.map((t) => (t.insiders as unknown as { full_name: string } | null)?.full_name ?? "")
-      );
+      if (insiderMap.size >= 2) {
+        const endDate = sorted[j - 1].transaction_date as string;
+        const insiderList = Array.from(insiderMap.values());
+        const totalValue = windowTxs.reduce((s, t) => s + (t.total_value as number), 0);
+        const cashValue = windowTxs.reduce((s, t) => {
+          const tt = (t as { transaction_type?: string | null }).transaction_type;
+          return NON_CASH_TYPES.has(tt ?? "") ? s : s + (t.total_value as number);
+        }, 0);
 
-      if (distinctInsiders.size >= 2) {
-        const endDate = windowTxs[windowTxs.length - 1].transaction_date as string;
-        const key = `${cid}:${startDate}`;
-        if (!emitted.has(key)) {
-          emitted.add(key);
-          signals.push({
-            company_id: cid,
-            company_name: companyName,
-            window_start: startDate,
-            window_end: endDate,
-            insiders: windowTxs.map((t) => ({
-              name: (t.insiders as unknown as { full_name: string; role: string | null } | null)?.full_name ?? "Unknown",
-              role: (t.insiders as unknown as { full_name: string; role: string | null } | null)?.role ?? null,
-              date: t.transaction_date as string,
-              quantity: t.quantity as number,
-              total_value: t.total_value as number,
-            })),
-            total_value: windowTxs.reduce((s, t) => s + (t.total_value as number), 0),
-          });
-        }
+        signals.push({
+          company_id: cid,
+          company_name: companyName,
+          window_start: startDate,
+          window_end: endDate,
+          insiders: insiderList,
+          total_value: totalValue,
+          cash_value: cashValue,
+        });
+
+        // Advance past the entire window so we don't create overlapping clusters
+        i = j;
+      } else {
+        i++;
       }
     }
   }
