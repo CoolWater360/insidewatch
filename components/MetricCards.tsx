@@ -1,10 +1,19 @@
+"use client";
+
 import { DashboardStats } from "@/lib/queries";
 import { formatCurrency } from "@/lib/format";
+import { useT, useLanguage } from "./LanguageProvider";
 
-function timeAgo(iso: string): string {
+function timeAgo(iso: string, lang: "it" | "en"): string {
   const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60)  return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (lang === "it") {
+    if (diff < 60)    return `${diff}s fa`;
+    if (diff < 3600)  return `${Math.floor(diff / 60)}m fa`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h fa`;
+    return `${Math.floor(diff / 86400)}g fa`;
+  }
+  if (diff < 60)    return `${diff}s ago`;
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
 }
@@ -36,39 +45,43 @@ function Card({ label, value, sub, accent }: CardProps) {
 }
 
 export function MetricCards({ stats }: { stats: DashboardStats }) {
-  const lastUpdated = stats.lastUpdatedAt ? timeAgo(stats.lastUpdatedAt) : null;
+  const t = useT();
+  const { lang } = useLanguage();
+  const lastUpdated = stats.lastUpdatedAt ? timeAgo(stats.lastUpdatedAt, lang) : null;
 
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card
-          label="Total Transactions"
+          label={t("Operazioni Totali", "Total Transactions")}
           value={stats.totalTransactions.toLocaleString("it-IT")}
-          sub={`${stats.companiesTracked} companies tracked`}
+          sub={`${stats.companiesTracked} ${t("società monitorate", "companies tracked")}`}
           accent="blue"
         />
         <Card
-          label="Filed This Week"
+          label={t("Archiviate questa settimana", "Filed This Week")}
           value={stats.weekCount === 0 ? "—" : String(stats.weekCount)}
-          sub={stats.weekCount === 0 ? "No filings this week" : "transactions"}
+          sub={stats.weekCount === 0
+            ? t("Nessuna operazione", "No filings this week")
+            : t("operazioni", "transactions")}
           accent="em"
         />
         <Card
-          label="Buy Value · 7d"
+          label={t("Valore Acquisti · 7g", "Buy Value · 7d")}
           value={stats.weekBuyValue > 0 ? formatCurrency(stats.weekBuyValue) : "—"}
-          sub="sum of buys"
+          sub={t("totale acquisti", "sum of buys")}
           accent="buy"
         />
         <Card
-          label="Sell Value · 7d"
+          label={t("Valore Vendite · 7g", "Sell Value · 7d")}
           value={stats.weekSellValue > 0 ? formatCurrency(stats.weekSellValue) : "—"}
-          sub="sum of sells"
+          sub={t("totale vendite", "sum of sells")}
           accent="sell"
         />
       </div>
       {lastUpdated && (
         <p className="text-right text-[11px] text-muted">
-          Last updated {lastUpdated}
+          {t("Ultimo aggiornamento", "Last updated")} {lastUpdated}
         </p>
       )}
     </div>

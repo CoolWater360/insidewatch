@@ -27,14 +27,21 @@ export function formatNumber(value: number | null | undefined): string {
   return new Intl.NumberFormat(LOCALE).format(value);
 }
 
-/** Format an ISO date (YYYY-MM-DD) as "17 giu 2026". Returns "—" for null. */
-export function formatDate(value: string | null | undefined): string {
+/** Format an ISO date as "17/06/2026" (IT) or "Jun 17, 2026" (EN). Returns "—" for null. */
+export function formatDate(value: string | null | undefined, lang: "it" | "en" = "it"): string {
   if (!value) return "—";
   const d = new Date(`${value}T00:00:00`);
   if (Number.isNaN(d.getTime())) return value;
-  return new Intl.DateTimeFormat(LOCALE, {
-    day: "2-digit",
+  if (lang === "it") {
+    return new Intl.DateTimeFormat("it-IT", {
+      day:   "2-digit",
+      month: "2-digit",
+      year:  "numeric",
+    }).format(d);
+  }
+  return new Intl.DateTimeFormat("en-GB", {
+    day:   "2-digit",
     month: "short",
-    year: "numeric",
+    year:  "numeric",
   }).format(d);
 }

@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCompanyById, getCompanyStats, getTransactions } from "@/lib/queries";
@@ -40,6 +41,10 @@ function StatCard({
 export default async function CompanyPage({ params, searchParams }: PageProps) {
   if (!isSupabaseConfigured) return <ConfigNotice />;
 
+  const jar  = await cookies();
+  const lang = (jar.get("insidewatch_lang")?.value === "en" ? "en" : "it") as "it" | "en";
+  const t    = (it: string, en: string) => lang === "it" ? it : en;
+
   const { id: idStr } = await params;
   const sp = await searchParams;
   const id = Number(idStr);
@@ -66,10 +71,9 @@ export default async function CompanyPage({ params, searchParams }: PageProps) {
         href="/"
         className="inline-flex items-center gap-1 text-xs text-muted hover:text-brand-blue transition-colors"
       >
-        ← All transactions
+        ← {t("Tutte le operazioni", "All transactions")}
       </Link>
 
-      {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-[#E8EDF7]">
@@ -93,17 +97,16 @@ export default async function CompanyPage({ params, searchParams }: PageProps) {
         )}
       </div>
 
-      {/* Stat cards */}
       <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Total" value={stats.total} accent="blue" />
-        <StatCard label="Buys"  value={stats.buys}  accent="buy"  />
-        <StatCard label="Sells" value={stats.sells} accent="sell" />
+        <StatCard label={t("Totale", "Total")} value={stats.total} accent="blue" />
+        <StatCard label={t("Acquisti", "Buys")}  value={stats.buys}  accent="buy"  />
+        <StatCard label={t("Vendite", "Sells")} value={stats.sells} accent="sell" />
       </div>
 
       <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">
-        Transaction History
+        {t("Storico Operazioni", "Transaction History")}
       </h2>
-      <TransactionTable rows={result.rows} current={current} basePath={basePath} />
+      <TransactionTable rows={result.rows} current={current} basePath={basePath} lang={lang} />
       <Pagination page={result.page} totalPages={result.totalPages} current={current} basePath={basePath} />
     </div>
   );

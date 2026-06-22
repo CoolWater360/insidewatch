@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { getDashboardStats, getCompanies, getTransactions } from "@/lib/queries";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { Direction } from "@/lib/types";
@@ -18,6 +19,10 @@ export default async function Home({ searchParams }: PageProps) {
   if (!isSupabaseConfigured) {
     return <ConfigNotice />;
   }
+
+  const jar  = await cookies();
+  const lang = (jar.get("insidewatch_lang")?.value === "en" ? "en" : "it") as "it" | "en";
+  const t    = (it: string, en: string) => lang === "it" ? it : en;
 
   const sp = await searchParams;
   const companyParam = firstParam(sp.company);
@@ -40,29 +45,24 @@ export default async function Home({ searchParams }: PageProps) {
 
   return (
     <div className="space-y-5">
-      {/* Metric cards */}
       <MetricCards stats={stats} />
 
-      {/* Table header */}
       <div className="flex items-center justify-between">
         <h1 className="text-base font-semibold tracking-tight text-[#E8EDF7]">
-          Recent Transactions
+          {t("Operazioni Recenti", "Recent Transactions")}
         </h1>
         <span className="text-xs text-muted">
-          {result.total.toLocaleString("it-IT")} records
+          {result.total.toLocaleString("it-IT")} {t("operazioni", "records")}
         </span>
       </div>
 
-      {/* Filters */}
       <Filters
         companies={companies}
         current={{ company: companyId, direction, from: dateFrom, to: dateTo }}
       />
 
-      {/* Table */}
-      <TransactionTable rows={result.rows} current={current} basePath="/" />
+      <TransactionTable rows={result.rows} current={current} basePath="/" lang={lang} />
 
-      {/* Pagination */}
       <Pagination page={result.page} totalPages={result.totalPages} current={current} basePath="/" />
     </div>
   );

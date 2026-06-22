@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Company } from "@/lib/types";
+import { useT } from "./LanguageProvider";
 
 interface Props {
   companies: Company[];
@@ -16,6 +17,7 @@ interface Props {
 
 export function Filters({ companies, current }: Props) {
   const router = useRouter();
+  const t = useT();
   const [company,   setCompany]   = useState(current.company ? String(current.company) : "");
   const [direction, setDirection] = useState(current.direction ?? "");
   const [from,      setFrom]      = useState(current.from ?? "");
@@ -39,14 +41,14 @@ export function Filters({ companies, current }: Props) {
   return (
     <div className="glass-card rounded-xl p-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-        <FilterLabel label="Company">
+        <FilterLabel label={t("Società", "Company")}>
           <div className="relative">
             <select
               value={company}
               onChange={(e) => setCompany(e.target.value)}
               className="pill-input w-full pr-7"
             >
-              <option value="">All companies</option>
+              <option value="">{t("Tutte le società", "All companies")}</option>
               {companies.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -57,23 +59,23 @@ export function Filters({ companies, current }: Props) {
           </div>
         </FilterLabel>
 
-        <FilterLabel label="Direction">
+        <FilterLabel label={t("Tipo", "Direction")}>
           <div className="relative">
             <select
               value={direction}
               onChange={(e) => setDirection(e.target.value)}
               className="pill-input w-full pr-7"
             >
-              <option value="">All</option>
-              <option value="buy">Buy</option>
-              <option value="sell">Sell</option>
-              <option value="unknown">Other</option>
+              <option value="">{t("Tutti", "All")}</option>
+              <option value="buy">{t("Acquisto", "Buy")}</option>
+              <option value="sell">{t("Vendita", "Sell")}</option>
+              <option value="unknown">{t("Altro", "Other")}</option>
             </select>
             <Chevron />
           </div>
         </FilterLabel>
 
-        <FilterLabel label="From">
+        <FilterLabel label={t("Dal", "From")}>
           <input
             type="date"
             value={from}
@@ -82,7 +84,7 @@ export function Filters({ companies, current }: Props) {
           />
         </FilterLabel>
 
-        <FilterLabel label="To">
+        <FilterLabel label={t("Al", "To")}>
           <input
             type="date"
             value={to}
@@ -93,7 +95,7 @@ export function Filters({ companies, current }: Props) {
 
         <div className="col-span-2 flex items-center gap-2 pt-1 sm:col-span-1 sm:items-end sm:pt-4">
           <button onClick={apply} className="btn-primary flex-1">
-            Apply
+            {t("Applica", "Apply")}
           </button>
         </div>
       </div>
