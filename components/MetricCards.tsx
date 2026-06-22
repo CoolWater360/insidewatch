@@ -48,20 +48,20 @@ export function MetricCards({ stats }: { stats: DashboardStats }) {
           accent="blue"
         />
         <Card
-          label="Filed Today"
-          value={stats.todayCount === 0 ? "—" : String(stats.todayCount)}
-          sub={stats.todayCount === 0 ? "No filings today" : "transactions"}
+          label="Filed This Week"
+          value={stats.weekCount === 0 ? "—" : String(stats.weekCount)}
+          sub={stats.weekCount === 0 ? "No filings this week" : "transactions"}
           accent="em"
         />
         <Card
-          label="Buy Value Today"
-          value={stats.todayBuyValue > 0 ? formatCurrency(stats.todayBuyValue) : "—"}
+          label="Buy Value · 7d"
+          value={stats.weekBuyValue > 0 ? formatCurrency(stats.weekBuyValue) : "—"}
           sub="sum of buys"
           accent="buy"
         />
         <Card
-          label="Sell Value Today"
-          value={stats.todaySellValue > 0 ? formatCurrency(stats.todaySellValue) : "—"}
+          label="Sell Value · 7d"
+          value={stats.weekSellValue > 0 ? formatCurrency(stats.weekSellValue) : "—"}
           sub="sum of sells"
           accent="sell"
         />

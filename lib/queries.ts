@@ -148,9 +148,9 @@ export async function getCompanyStats(companyId: number): Promise<CompanyStats> 
 
 export interface DashboardStats {
   totalTransactions: number;
-  todayCount: number;
-  todayBuyValue: number;
-  todaySellValue: number;
+  weekCount: number;
+  weekBuyValue: number;
+  weekSellValue: number;
   companiesTracked: number;
   lastUpdatedAt: string | null;
 }
@@ -158,20 +158,22 @@ export interface DashboardStats {
 export async function getDashboardStats(): Promise<DashboardStats> {
   const supabase = getSupabase();
   const empty: DashboardStats = {
-    totalTransactions: 0, todayCount: 0, todayBuyValue: 0,
-    todaySellValue: 0, companiesTracked: 0, lastUpdatedAt: null,
+    totalTransactions: 0, weekCount: 0, weekBuyValue: 0,
+    weekSellValue: 0, companiesTracked: 0, lastUpdatedAt: null,
   };
   if (!supabase) return empty;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date();
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const weekAgoStr = weekAgo.toISOString().slice(0, 10);
 
-  const [total, companies, todayTx, lastTx] = await Promise.all([
+  const [total, companies, weekTx, lastTx] = await Promise.all([
     supabase.from("transactions").select("id", { count: "exact", head: true }),
     supabase.from("companies").select("id", { count: "exact", head: true }),
     supabase
       .from("transactions")
       .select("direction, total_value")
-      .eq("transaction_date", today),
+      .gte("transaction_date", weekAgoStr),
     supabase
       .from("transactions")
       .select("created_at")
@@ -179,15 +181,15 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       .limit(1),
   ]);
 
-  const todayRows = todayTx.data ?? [];
-  const todayBuyValue  = todayRows.filter(r => r.direction === "buy") .reduce((s, r) => s + (r.total_value || 0), 0);
-  const todaySellValue = todayRows.filter(r => r.direction === "sell").reduce((s, r) => s + (r.total_value || 0), 0);
+  const weekRows = weekTx.data ?? [];
+  const weekBuyValue  = weekRows.filter(r => r.direction === "buy") .reduce((s, r) => s + (r.total_value || 0), 0);
+  const weekSellValue = weekRows.filter(r => r.direction === "sell").reduce((s, r) => s + (r.total_value || 0), 0);
 
   return {
     totalTransactions: total.count ?? 0,
-    todayCount:        todayRows.length,
-    todayBuyValue,
-    todaySellValue,
+    weekCount:         weekRows.length,
+    weekBuyValue,
+    weekSellValue,
     companiesTracked:  companies.count ?? 0,
     lastUpdatedAt:     lastTx.data?.[0]?.created_at ?? null,
   };
