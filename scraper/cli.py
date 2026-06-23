@@ -3,17 +3,20 @@
 Filing ledger CLI — Phase 2.
 
 Commands:
-    inspect   <url-or-id>   Show the full status of a filing.
-    retry     <url-or-id>   Reset a specific filing to pending for reprocessing.
-    retry-all               Reset ALL failed filings (optionally filtered by
-                            --max-age-hours) to pending.  Useful after a scraper
-                            bug that caused mass failures.
-    list-failed             List all filings in 'failed' or 'skipped' status.
-    reap-stale              Recover filings stuck in_progress by a crashed worker.
-    check-pdf <url-or-id>   Download the PDF and compare its SHA-256 against the
-                            stored value. Reports: unchanged | CHANGED | unavailable.
-                            NOTE: changed-PDF re-processing is not automatic; use
-                            `retry <url-or-id>` if re-parse is needed.
+    inspect   <url-or-id>       Show the full status of a filing.
+    retry     <url-or-id>       Reset a specific filing to pending for reprocessing.
+    retry-all                   Reset ALL failed filings (optionally filtered by
+                                --max-age-hours) to pending.  Useful after a scraper
+                                bug that caused mass failures.
+    list-failed                 List all filings in 'failed' or 'skipped' status.
+    reap-stale                  Recover filings stuck in_progress by a crashed worker.
+    check-pdf <url-or-id>       Download the PDF and compare its SHA-256 against the
+                                stored value. Reports: unchanged | CHANGED | unavailable.
+                                NOTE: changed-PDF re-processing is not automatic; use
+                                `retry <url-or-id>` if re-parse is needed.
+    verify-storage-lineage      Report completed filings missing storage evidence
+                                (storage_path, file_size_bytes, or pdf_sha256).
+                                Use --fix to reset them to 'failed' for re-processing.
 
 Usage:
     python3 -m scraper.cli inspect https://...pdf
@@ -27,6 +30,8 @@ Usage:
     python3 -m scraper.cli reap-stale --stale-minutes 60
     python3 -m scraper.cli check-pdf https://...pdf
     python3 -m scraper.cli check-pdf 42
+    python3 -m scraper.cli verify-storage-lineage
+    python3 -m scraper.cli verify-storage-lineage --fix
 """
 
 import argparse
@@ -215,6 +220,69 @@ def cmd_check_pdf(client, args) -> int:
     return 2
 
 
+def cmd_verify_storage_lineage(client, args) -> int:
+    """
+    Report (and optionally fix) completed filings that lack storage evidence.
+
+    Applies to filings processed BEFORE the hardening patch (commit 320f17c),
+    when record_storage() was non-fatal and could silently fail.  After the
+    patch, no new completed filing can lack storage_path, file_size_bytes, or
+    pdf_sha256 — this command verifies and remediates the historical backlog.
+
+    Without --fix:  list every offending filing and exit 1 if any are found.
+    With    --fix:  reset each offending filing to 'failed' so the next scraper
+                    run re-downloads, re-stores, and re-parses it.  Re-uploading
+                    the same PDF to the same SHA-256-derived path is idempotent.
+
+    Exit codes:
+      0 — no incomplete completed filings found
+      1 — incomplete filings found (--fix: after resetting them to failed)
+    """
+    result = (
+        client.table("filings")
+        .select("id, pdf_url, status, storage_path, file_size_bytes, pdf_sha256, completed_at")
+        .eq("status", "completed")
+        .or_("storage_path.is.null,file_size_bytes.is.null,pdf_sha256.is.null")
+        .order("id")
+        .execute()
+    )
+    rows = result.data or []
+
+    if not rows:
+        print("Storage-lineage invariant OK: all completed filings have evidence fields.")
+        return 0
+
+    print(f"\nFound {len(rows)} completed filing(s) missing storage evidence:\n")
+    print(f"  {'ID':>6}  {'storage_path':<8}  {'file_size':>9}  {'sha256':>6}  URL")
+    print("  " + "─" * 80)
+    for r in rows:
+        sp  = "present" if r.get("storage_path") else "MISSING"
+        fs  = "present" if r.get("file_size_bytes") is not None else "MISSING"
+        sha = "present" if r.get("pdf_sha256") else "MISSING"
+        url = str(r.get("pdf_url") or "")[:60]
+        print(f"  {r['id']:>6}  {sp:<12}  {fs:>9}  {sha:>6}  {url}")
+
+    if not args.fix:
+        print(
+            f"\n{len(rows)} filing(s) need remediation. "
+            "Re-run with --fix to reset them to 'failed' for re-processing."
+        )
+        return 1
+
+    print(f"\nResetting {len(rows)} filing(s) to 'failed' for re-processing...")
+    fixed = 0
+    for r in rows:
+        ok = filing_ledger.reset_for_retry(client, str(r["id"]))
+        if ok:
+            fixed += 1
+            print(f"  ✓  #{r['id']}  reset to failed")
+        else:
+            print(f"  ✗  #{r['id']}  reset failed (already in unexpected state)")
+
+    print(f"\n{fixed}/{len(rows)} filing(s) reset. Run the scraper to re-process them.")
+    return 0 if fixed == len(rows) else 1
+
+
 def cmd_list_failed(client, args) -> int:
     status_filter = args.status or ["failed", "skipped"]
     if isinstance(status_filter, str):
@@ -289,6 +357,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Compare a filing's live PDF SHA-256 against the stored value")
     pcp.add_argument("target", help="PDF URL or filing integer ID")
 
+    # verify-storage-lineage
+    pvsl = sub.add_parser(
+        "verify-storage-lineage",
+        help="Report completed filings missing storage evidence (storage_path / file_size_bytes / pdf_sha256)",
+    )
+    pvsl.add_argument(
+        "--fix", action="store_true",
+        help="Reset offending filings to 'failed' so the scraper re-processes them",
+    )
+
     return p
 
 
@@ -311,12 +389,13 @@ def main() -> None:
         sys.exit(1)
 
     dispatch = {
-        "inspect":     cmd_inspect,
-        "retry":       cmd_retry,
-        "retry-all":   cmd_retry_all,
-        "list-failed": cmd_list_failed,
-        "reap-stale":  cmd_reap_stale,
-        "check-pdf":   cmd_check_pdf,
+        "inspect":                  cmd_inspect,
+        "retry":                    cmd_retry,
+        "retry-all":                cmd_retry_all,
+        "list-failed":              cmd_list_failed,
+        "reap-stale":               cmd_reap_stale,
+        "check-pdf":                cmd_check_pdf,
+        "verify-storage-lineage":   cmd_verify_storage_lineage,
     }
     sys.exit(dispatch[args.command](client, args))
 

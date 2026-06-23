@@ -51,9 +51,18 @@ jobs:
       || github.event.schedule == '*/1 8-18 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 3
-    # Allow up to 3 concurrent listener runs (one per minute × 3-minute timeout).
-    # cancel-in-progress: false ensures each run completes; the DB claim-token
-    # prevents two runners from processing the same filing simultaneously.
+    # Actual GitHub Actions behaviour with cancel-in-progress: false:
+    #   · Only ONE run per group is ACTIVE at a time.
+    #   · A second trigger while a run is active queues behind it (not concurrent).
+    #   · If multiple triggers queue up, GitHub retains only the MOST RECENTLY
+    #     queued run and cancels all earlier queued ones ("collapse").
+    # Effect for this listener (1-min schedule, 3-min timeout):
+    #   a run starts, newer triggers collapse into a single queued run; when the
+    #   active run finishes the one queued run starts immediately. Max latency
+    #   from filing publication to processing: ~6 min (3 min remaining in active
+    #   run + 3 min for the next run). This is acceptable for end-of-day insider
+    #   disclosure monitoring. The DB claim-token remains the authoritative
+    #   concurrency guard for individual filings.
     concurrency:
       group: scraper-listener
       cancel-in-progress: false
@@ -104,8 +113,10 @@ jobs:
       || github.event.schedule == '0 7 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Only one sweep at a time; a second trigger queues rather than cancels the
-    # running sweep so no filings are silently dropped mid-crawl.
+    # Only one sweep is active at a time. A second trigger while one is running
+    # queues behind it (not concurrent). Multiple queued triggers collapse to
+    # the most recently queued one. The running sweep is never cancelled
+    # mid-crawl; it completes fully before the next begins.
     concurrency:
       group: scraper-sweep
       cancel-in-progress: false
