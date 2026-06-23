@@ -1,0 +1,408 @@
+openapi: "3.1.0"
+
+info:
+  title: InsideWatch API
+  version: "1.0.0"
+  description: |
+    Private institutional REST API for Italian insider-dealing data.
+    Requires a Bearer token in every request.
+  contact:
+    email: alessandrotudorconsorti@gmail.com
+
+servers:
+  - url: https://your-domain.com/api/v1
+    description: Production
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Set INSIDEWATCH_API_KEY on the server. Pass the same value as a
+        Bearer token in every request.
+
+  schemas:
+    Meta:
+      type: object
+      properties:
+        version:      { type: string, example: "v1" }
+        generated_at: { type: string, format: date-time }
+
+    Pagination:
+      type: object
+      properties:
+        page:        { type: integer, example: 1 }
+        page_size:   { type: integer, example: 25 }
+        total:       { type: integer, example: 142 }
+        total_pages: { type: integer, example: 6 }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Transaction:
+      type: object
+      properties:
+        id:                      { type: integer }
+        transaction_date:        { type: string, format: date }
+        filed_date:              { type: string, format: date, nullable: true }
+        company_id:              { type: integer }
+        insider_id:              { type: integer }
+        direction:               { type: string, enum: [buy, sell, unknown] }
+        transaction_type:
+          type: string
+          nullable: true
+          enum:
+            - buy
+            - sell
+            - grant
+            - option_exercise
+            - sell_to_cover
+            - subscription
+            - conversion
+            - inheritance
+            - gift_in
+            - gift_out
+            - transfer_in
+            - transfer_out
+            - pledge_or_security
+            - derivative_transaction
+            - other
+            - unknown
+        economic_intent:
+          type: string
+          nullable: true
+          enum: [discretionary, mechanical, unclear]
+        quantity:    { type: number }
+        unit_price:  { type: number }
+        total_value: { type: number }
+        currency:    { type: string, example: EUR }
+        instrument_type: { type: string, nullable: true }
+        isin:        { type: string, nullable: true }
+        review_status:
+          type: string
+          nullable: true
+          enum: [pending_review, under_review, confirmed, rejected, corrected]
+        source_url:  { type: string, nullable: true }
+        companies:
+          type: object
+          nullable: true
+          properties:
+            id:     { type: integer }
+            name:   { type: string }
+            ticker: { type: string, nullable: true }
+            sector: { type: string, nullable: true }
+        insiders:
+          type: object
+          nullable: true
+          properties:
+            full_name: { type: string }
+            role:      { type: string, nullable: true }
+
+    Filing:
+      type: object
+      properties:
+        id:                   { type: integer }
+        pdf_url:              { type: string }
+        filing_date:          { type: string, format: date, nullable: true }
+        company_name:         { type: string, nullable: true }
+        status:               { type: string, enum: [pending, in_progress, completed, failed, skipped] }
+        attempt_count:        { type: integer }
+        max_attempts:         { type: integer }
+        last_attempted_at:    { type: string, format: date-time, nullable: true }
+        next_attempt_after:   { type: string, format: date-time, nullable: true }
+        pdf_sha256:           { type: string, nullable: true }
+        error_message:        { type: string, nullable: true }
+        first_seen_at:        { type: string, format: date-time, nullable: true }
+        completed_at:         { type: string, format: date-time, nullable: true }
+        source_published_utc: { type: string, format: date-time, nullable: true }
+        discovered_utc:       { type: string, format: date-time, nullable: true }
+        downloaded_utc:       { type: string, format: date-time, nullable: true }
+        parsed_utc:           { type: string, format: date-time, nullable: true }
+        validated_utc:        { type: string, format: date-time, nullable: true }
+        delivered_utc:        { type: string, format: date-time, nullable: true }
+
+    Issuer:
+      type: object
+      properties:
+        id:             { type: integer }
+        canonical_name: { type: string }
+        short_name:     { type: string, nullable: true }
+        lei:            { type: string, nullable: true }
+        country:        { type: string, example: IT }
+        market:         { type: string, nullable: true }
+        sector:         { type: string, nullable: true }
+        status:
+          type: string
+          enum: [active, delisted, suspended, pending_review]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    IssuerAlias:
+      type: object
+      properties:
+        id:         { type: integer }
+        alias:      { type: string }
+        alias_type:
+          type: string
+          enum: [name, isin, lei, ticker, avviso_header]
+        is_primary: { type: boolean }
+        source:     { type: string }
+
+    IssuerWithAliases:
+      allOf:
+        - $ref: "#/components/schemas/Issuer"
+        - type: object
+          properties:
+            issuer_aliases:
+              type: array
+              items: { $ref: "#/components/schemas/IssuerAlias" }
+
+    ClusterInsider:
+      type: object
+      properties:
+        name:             { type: string }
+        role:             { type: string, nullable: true }
+        date:             { type: string, format: date }
+        quantity:         { type: number }
+        total_value:      { type: number }
+        transaction_type: { type: string, nullable: true }
+
+    ClusterSignal:
+      type: object
+      properties:
+        company_id:   { type: integer }
+        company_name: { type: string }
+        window_start: { type: string, format: date }
+        window_end:   { type: string, format: date }
+        insiders:
+          type: array
+          items: { $ref: "#/components/schemas/ClusterInsider" }
+        total_value: { type: number }
+        cash_value:  { type: number }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Rate limit exceeded.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                properties:
+                  retry_after_seconds: { type: integer, example: 60 }
+    Unavailable:
+      description: API key not configured on the server.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Operational status of the InsideWatch pipeline. Does not count against your rate limit.
+      security: [{ bearerAuth: [] }]
+      tags: [Meta]
+      responses:
+        "200":
+          description: Health status (ok or degraded — inspect `.status`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:            { type: string, enum: [ok, degraded, error] }
+                  version:           { type: string, example: v1 }
+                  db_ok:             { type: boolean }
+                  scraper_last_run:  { type: string, format: date-time, nullable: true }
+                  last_filing_at:    { type: string, format: date-time, nullable: true }
+                  generated_at:      { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /transactions:
+    get:
+      summary: List transactions
+      tags: [Transactions]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: company_id,       in: query, schema: { type: integer } }
+        - { name: direction,        in: query, schema: { type: string, enum: [buy, sell, unknown] } }
+        - { name: date_from,        in: query, schema: { type: string, format: date } }
+        - { name: date_to,          in: query, schema: { type: string, format: date } }
+        - { name: transaction_type, in: query, schema: { type: string } }
+        - { name: cash_only,        in: query, schema: { type: boolean, default: true } }
+        - { name: sort,             in: query, schema: { type: string, enum: [transaction_date, filed_date, total_value, quantity], default: transaction_date } }
+        - { name: order,            in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+        - { name: page,             in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size,        in: query, schema: { type: integer, default: 25, maximum: 100 } }
+        - { name: format,           in: query, schema: { type: string, enum: [json, csv], default: json } }
+      responses:
+        "200":
+          description: Paginated list of transactions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+            text/csv:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /transactions/{id}:
+    get:
+      summary: Get transaction by ID
+      tags: [Transactions]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Single transaction.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/Transaction" }, maxItems: 1 }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+        "400": { description: Non-numeric id. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /filings/{id}:
+    get:
+      summary: Get filing by ID
+      tags: [Filings]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Single filing with latency timestamps.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/Filing" }, maxItems: 1 }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+        "400": { description: Non-numeric id. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /issuers:
+    get:
+      summary: List issuers
+      tags: [Issuers]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: status,     in: query, schema: { type: string, enum: [active, delisted, suspended, pending_review], default: active } }
+        - { name: country,    in: query, schema: { type: string, example: IT } }
+        - { name: page,       in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size,  in: query, schema: { type: integer, default: 50, maximum: 100 } }
+      responses:
+        "200":
+          description: Paginated list of issuers.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/Issuer" } }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+        "400": { description: Invalid status value. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /issuers/{id}:
+    get:
+      summary: Get issuer by ID
+      tags: [Issuers]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Single issuer with aliases.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/IssuerWithAliases" }, maxItems: 1 }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+        "400": { description: Non-numeric id. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /signals/cluster-buys:
+    get:
+      summary: Cluster-buy signals
+      description: |
+        Returns episodes where 2+ distinct insiders at the same company made
+        discretionary cash purchases within a 7-day rolling window.
+        Grants and option exercises are excluded.
+        Results are sorted most-recent first by window_end.
+      tags: [Signals]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: lookback_days, in: query, schema: { type: integer, default: 90, minimum: 7, maximum: 365 } }
+        - { name: format,        in: query, schema: { type: string, enum: [json, csv], default: json } }
+      responses:
+        "200":
+          description: List of cluster-buy signals.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/ClusterSignal" } }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+                  meta:       { $ref: "#/components/schemas/Meta" }
+            text/csv:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+tags:
+  - { name: Meta,         description: Health and status endpoints }
+  - { name: Transactions, description: Insider transaction records }
+  - { name: Filings,      description: Source PDF filing records }
+  - { name: Issuers,      description: Canonical issuer master list }
+  - { name: Signals,      description: Derived analytical signals }
