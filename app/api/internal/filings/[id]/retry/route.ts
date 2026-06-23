@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServer } from "@/lib/supabase-server";
-import { checkOrigin, getActor, logAudit } from "@/lib/internal-audit";
+import { checkOrigin, getActor } from "@/lib/internal-audit";
+import { retryFiling } from "@/lib/internal-actions";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // ── Route-level CSRF guard ────────────────────────────────────────────────
   if (!checkOrigin(request.headers.get("origin"), request.headers.get("host") ?? "")) {
     return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
   }
@@ -20,39 +20,16 @@ export async function POST(
   const db = getSupabaseServer();
   const actor = getActor();
 
-  const { data: filing, error: fetchErr } = await db
+  const { error: findErr } = await db
     .from("filings")
-    .select("id, status, attempt_count, max_attempts")
+    .select("id")
     .eq("id", filingId)
     .single();
-
-  if (fetchErr || !filing) {
+  if (findErr) {
     return NextResponse.json({ error: "Filing not found." }, { status: 404 });
   }
 
-  const { error } = await db
-    .from("filings")
-    .update({
-      status:             "pending",
-      claim_token:        null,
-      next_attempt_after: null,
-      last_error:         null,
-    })
-    .eq("id", filingId);
-
-  if (error) {
-    console.error("retry filing error:", error.message);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  await logAudit(db, {
-    actionType:   "retry_filing",
-    entityType:   "filing",
-    entityId:     filingId,
-    actor,
-    beforeValues: { status: filing.status, attempt_count: filing.attempt_count },
-    afterValues:  { status: "pending" },
-  });
-
+  const result = await retryFiling(db, filingId, actor);
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

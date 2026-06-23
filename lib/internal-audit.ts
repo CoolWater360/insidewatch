@@ -12,8 +12,6 @@
  *   Requests without an Origin header (curl, server-to-server) are allowed through.
  */
 
-import type { SupabaseClient } from "@supabase/supabase-js";
-
 // ─── Actor ────────────────────────────────────────────────────────────────────
 
 /**
@@ -78,42 +76,3 @@ export function checkOrigin(origin: string | null, host: string): boolean {
   }
 }
 
-// ─── Audit log ────────────────────────────────────────────────────────────────
-
-export type EntityType = "transaction" | "filing" | "unmatched_issuer";
-
-export interface AuditEvent {
-  actionType: string;       // 'confirm' | 'reject' | 'reclassify' | 'retry_filing' |
-                            // 'resolve_issuer' | 'reject_issuer' | 'add_review_note'
-  entityType: EntityType;
-  entityId: number;
-  actor: string;            // value of INTERNAL_ACTOR_LABEL
-  beforeValues?: Record<string, unknown> | null;
-  afterValues?: Record<string, unknown> | null;
-}
-
-/**
- * Appends an immutable row to internal_audit_log.
- * Non-fatal: logs on failure rather than propagating — the primary action
- * must not be blocked by an audit write failure.
- */
-export async function logAudit(
-  db: SupabaseClient,
-  event: AuditEvent
-): Promise<void> {
-  const { error } = await db.from("internal_audit_log").insert({
-    action_type:   event.actionType,
-    entity_type:   event.entityType,
-    entity_id:     event.entityId,
-    actor:         event.actor,
-    before_values: event.beforeValues ?? null,
-    after_values:  event.afterValues  ?? null,
-  });
-  if (error) {
-    // Audit failure is always logged but never blocks the action.
-    console.error(
-      `[audit] Failed to write ${event.actionType} on ${event.entityType}#${event.entityId}:`,
-      error.message
-    );
-  }
-}

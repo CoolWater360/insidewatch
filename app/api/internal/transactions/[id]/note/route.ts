@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServer } from "@/lib/supabase-server";
-import { checkOrigin, getActor, logAudit } from "@/lib/internal-audit";
+import { checkOrigin, getActor } from "@/lib/internal-audit";
+import { addReviewNote } from "@/lib/internal-actions";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // ── Route-level CSRF guard ────────────────────────────────────────────────
   if (!checkOrigin(request.headers.get("origin"), request.headers.get("host") ?? "")) {
     return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
   }
@@ -31,33 +31,17 @@ export async function POST(
 
   const db = getSupabaseServer();
   const actor = getActor();
-  const now = new Date().toISOString();
 
-  // Fetch current note for before_values.
-  const { data: current } = await db
+  const { error: findErr } = await db
     .from("transactions")
-    .select("review_notes")
+    .select("id")
     .eq("id", transactionId)
     .single();
-
-  const { error } = await db
-    .from("transactions")
-    .update({ review_notes: note, updated_at: now })
-    .eq("id", transactionId);
-
-  if (error) {
-    console.error("note update error:", error.message);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (findErr) {
+    return NextResponse.json({ error: "Transaction not found." }, { status: 404 });
   }
 
-  await logAudit(db, {
-    actionType:   "add_review_note",
-    entityType:   "transaction",
-    entityId:     transactionId,
-    actor,
-    beforeValues: { review_notes: current?.review_notes ?? null },
-    afterValues:  { review_notes: note },
-  });
-
+  const result = await addReviewNote(db, transactionId, note, actor);
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

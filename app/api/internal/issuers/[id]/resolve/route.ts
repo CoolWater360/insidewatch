@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServer } from "@/lib/supabase-server";
-import { checkOrigin, getActor, logAudit } from "@/lib/internal-audit";
+import { checkOrigin, getActor } from "@/lib/internal-audit";
+import { resolveIssuer, rejectIssuer } from "@/lib/internal-actions";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // ── Route-level CSRF guard ────────────────────────────────────────────────
   if (!checkOrigin(request.headers.get("origin"), request.headers.get("host") ?? "")) {
     return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
   }
@@ -35,71 +35,28 @@ export async function POST(
   const db = getSupabaseServer();
   const actor = getActor();
 
-  // Fetch before-state for audit log (needed for both actions).
-  const { data: unmatched, error: fetchErr } = await db
+  const { error: findErr } = await db
     .from("unmatched_issuers")
-    .select("id, raw_name, isin, status")
+    .select("id")
     .eq("id", unmatchedId)
     .single();
-
-  if (fetchErr || !unmatched) {
+  if (findErr) {
     return NextResponse.json({ error: "Unmatched issuer not found." }, { status: 404 });
   }
 
-  // ── reject ────────────────────────────────────────────────────────────────
   if (action === "reject") {
-    const { error } = await db
-      .from("unmatched_issuers")
-      .update({ status: "rejected" })
-      .eq("id", unmatchedId);
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-    await logAudit(db, {
-      actionType:   "reject_issuer",
-      entityType:   "unmatched_issuer",
-      entityId:     unmatchedId,
-      actor,
-      beforeValues: { status: unmatched.status, raw_name: unmatched.raw_name },
-      afterValues:  { status: "rejected" },
-    });
+    const result = await rejectIssuer(db, unmatchedId, actor);
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
     return NextResponse.json({ ok: true });
   }
 
-  // ── resolve ───────────────────────────────────────────────────────────────
+  // resolve
   const { issuer_id } = body;
   if (!issuer_id || isNaN(issuer_id)) {
     return NextResponse.json({ error: "issuer_id is required." }, { status: 400 });
   }
 
-  const { error: resolveErr } = await db
-    .from("unmatched_issuers")
-    .update({ status: "resolved", resolved_issuer_id: issuer_id })
-    .eq("id", unmatchedId);
-
-  if (resolveErr) {
-    return NextResponse.json({ error: resolveErr.message }, { status: 500 });
-  }
-
-  // Backfill companies.issuer_id for all companies with this raw name.
-  const { error: backfillErr } = await db
-    .from("companies")
-    .update({ issuer_id })
-    .ilike("name", unmatched.raw_name)
-    .is("issuer_id", null);
-
-  if (backfillErr) {
-    console.warn("backfill companies.issuer_id failed:", backfillErr.message);
-  }
-
-  await logAudit(db, {
-    actionType:   "resolve_issuer",
-    entityType:   "unmatched_issuer",
-    entityId:     unmatchedId,
-    actor,
-    beforeValues: { status: unmatched.status, raw_name: unmatched.raw_name, isin: unmatched.isin },
-    afterValues:  { status: "resolved", issuer_id },
-  });
-
+  const result = await resolveIssuer(db, unmatchedId, issuer_id, actor);
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
