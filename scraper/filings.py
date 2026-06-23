@@ -386,6 +386,35 @@ def skip_filing(client, filing_id: int, *, reason: str, claim_token: str) -> boo
     return True
 
 
+def record_storage(
+    client,
+    filing_id: int,
+    *,
+    storage_path: str,
+    file_size_bytes: int,
+    raw_extracted_text: Optional[str] = None,
+) -> None:
+    """
+    Persist storage metadata after a PDF has been successfully uploaded.
+
+    This is a plain metadata update — not a state transition — so it does not
+    require a claim_token and does not check status.  The path is deterministic
+    (sha256-based) and all values are idempotent: writing the same metadata
+    twice is safe.
+
+    Non-fatal: the caller should log and continue if this raises.
+    """
+    client.table("filings").update({
+        "storage_path":       storage_path,
+        "file_size_bytes":    file_size_bytes,
+        "raw_extracted_text": raw_extracted_text,
+        "updated_at":         _now(),
+    }).eq("id", filing_id).execute()
+    logger.debug(
+        "Filing %d: storage recorded — %s (%d bytes)", filing_id, storage_path, file_size_bytes
+    )
+
+
 def get_retryable_filings(client) -> list[dict]:
     """
     Reap stale in_progress rows, then return failed filings whose backoff

@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import logging
 import os
 import requests
@@ -26,6 +27,7 @@ from .alerts import AlertPayload, dispatch
 from .db import get_supabase_client, load_seed_companies, upsert_transaction
 from .fetcher import BlockedError, _make_session, iter_company_listings, download_pdf
 from . import filings as filing_ledger
+from . import storage as doc_storage
 from .parser import parse_pdf
 
 logging.basicConfig(
@@ -43,6 +45,7 @@ def _crawl_company(
     polite_delay: float,
     max_pdfs: int,
     use_ledger: bool = False,
+    storage_backend=None,
 ) -> dict:
     """
     Crawl a single company in its own requests.Session (thread-safe).
@@ -156,6 +159,37 @@ def _crawl_company(
                 stats["errors"] += 1
                 continue
 
+            # ── Store raw PDF — Phase 3 gate ──────────────────────────────────
+            pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+            if use_ledger and filing_id and storage_backend is not None:
+                try:
+                    storage_path, _ = doc_storage.store_pdf(
+                        storage_backend, pdf_bytes, pdf_sha256, row.filing_date
+                    )
+                    raw_text = doc_storage.extract_raw_text(pdf_bytes)
+                    try:
+                        filing_ledger.record_storage(
+                            client, filing_id,
+                            storage_path=storage_path,
+                            file_size_bytes=len(pdf_bytes),
+                            raw_extracted_text=raw_text or None,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Filing %d: record_storage failed (non-fatal): %s", filing_id, exc
+                        )
+                except Exception as exc:
+                    logger.error("Filing %d: PDF storage failed: %s", filing_id, exc)
+                    filing_ledger.fail_filing(
+                        client, filing_id,
+                        error=f"storage failure: {exc}",
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                        claim_token=claim_token,
+                    )
+                    stats["errors"] += 1
+                    continue
+
             # ── Parse ─────────────────────────────────────────────────────────
             transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
             if not transactions:
@@ -168,7 +202,6 @@ def _crawl_company(
                 continue
 
             # ── Upsert transactions ───────────────────────────────────────────
-            pdf_sha256  = transactions[0].raw_document_sha256 if transactions else None
             tx_inserted = 0
             tx_dedup    = 0
 
@@ -285,9 +318,11 @@ def run_crawl(
         sys.exit(1)
 
     use_ledger = filing_ledger.table_exists(client)
+    storage_backend = None
     if use_ledger:
         logger.info("Filing ledger available — filing-level dedup and retry tracking enabled")
         filing_ledger.reap_stale_filings(client)   # recover crashed workers before crawl
+        storage_backend = doc_storage.get_storage_backend(client)
     else:
         allow_legacy = os.getenv("ALLOW_LEGACY_INGESTION", "").lower() in ("1", "true", "yes")
         if not allow_legacy:
@@ -356,7 +391,8 @@ def run_crawl(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_name = {
             executor.submit(
-                _crawl_company, name, tier, client, polite_delay, max_pdfs_per_company, use_ledger
+                _crawl_company,
+                name, tier, client, polite_delay, max_pdfs_per_company, use_ledger, storage_backend,
             ): name
             for name, tier in all_companies
         }

@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS filings (
     -- Version of the scraper that last processed (or attempted to process) this filing.
     scraper_version             TEXT,
 
+    -- ── Phase 3: Raw document preservation ────────────────────────────────
+    -- Path inside the storage backend: filings/{year}/{month:02d}/{sha256}.pdf
+    -- Set immediately after download; NULL if the document was never stored.
+    storage_path                TEXT,
+    -- PDF file size in bytes; recorded alongside storage_path.
+    file_size_bytes             BIGINT,
+    -- Full text extracted from the PDF (pdfplumber); stored for source lineage
+    -- and future re-parse without re-downloading.  May be large; TOAST-compressed
+    -- automatically by Postgres when > ~2 KB.
+    raw_extracted_text          TEXT,
+
     -- ── Timestamps ─────────────────────────────────────────────────────────
     -- first_seen_at is set once on INSERT and never updated.
     first_seen_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),

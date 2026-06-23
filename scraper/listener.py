@@ -20,6 +20,7 @@ Typical run:
   1 new filing  → ~5–15 s  (listing + 1 PDF download + parse + DB insert)
 """
 
+import hashlib
 import logging
 import os
 from typing import Optional
@@ -28,6 +29,7 @@ import requests
 
 from . import cache
 from . import filings as filing_ledger
+from . import storage as doc_storage
 from .alerts import AlertPayload, dispatch
 from .db import get_supabase_client, upsert_transaction
 from .fetcher import BlockedError, _make_session, download_pdf, fetch_listing_page
@@ -66,7 +68,8 @@ def run_listener() -> dict:
     session = _make_session()
 
     if filing_ledger.table_exists(client):
-        return _run_with_ledger(client, session, stats)
+        storage_backend = doc_storage.get_storage_backend(client)
+        return _run_with_ledger(client, session, stats, storage_backend)
 
     # ── Filings table not available ───────────────────────────────────────────
     allow_legacy = os.getenv("ALLOW_LEGACY_INGESTION", "").lower() in ("1", "true", "yes")
@@ -109,7 +112,7 @@ def _warn_legacy_mode() -> None:
 
 # ── Ledger path (Phase 2) ─────────────────────────────────────────────────────
 
-def _run_with_ledger(client, session: requests.Session, stats: dict) -> dict:
+def _run_with_ledger(client, session: requests.Session, stats: dict, storage_backend) -> dict:
     """Process new and retryable filings using the durable DB ledger."""
 
     # Recover any filings left in_progress by a previous crashed run.
@@ -179,7 +182,7 @@ def _run_with_ledger(client, session: requests.Session, stats: dict) -> dict:
     # Step 4: process eligible filings
     for row, filing in to_process:
         try:
-            result = _process_filing_with_ledger(row, filing, client, session)
+            result = _process_filing_with_ledger(row, filing, client, session, storage_backend)
             if result == "new":
                 stats["new"] += 1
             elif result == "retried":
@@ -198,6 +201,7 @@ def _process_filing_with_ledger(
     filing: dict,
     client,
     session: requests.Session,
+    storage_backend,
 ) -> str:
     """
     Download, parse, upsert, and complete/fail one filing using the ledger.
@@ -241,6 +245,35 @@ def _process_filing_with_ledger(
         )
         raise
 
+    # Store raw PDF — Phase 3 gate: every filing must have a stored document.
+    pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+    try:
+        storage_path, _ = doc_storage.store_pdf(
+            storage_backend, pdf_bytes, pdf_sha256, row.filing_date
+        )
+    except Exception as exc:
+        filing_ledger.fail_filing(
+            client, filing_id,
+            error=f"storage failure: {exc}",
+            attempt_count=attempt_count,
+            max_attempts=max_attempts,
+            claim_token=claim_token,
+        )
+        raise RuntimeError(f"Filing {filing_id}: PDF storage failed — {exc}") from exc
+
+    # Record storage metadata (non-fatal: storage_path already written; metadata
+    # can be recovered on the next run if this update fails).
+    raw_text = doc_storage.extract_raw_text(pdf_bytes)
+    try:
+        filing_ledger.record_storage(
+            client, filing_id,
+            storage_path=storage_path,
+            file_size_bytes=len(pdf_bytes),
+            raw_extracted_text=raw_text or None,
+        )
+    except Exception as exc:
+        logger.warning("Filing %d: record_storage failed (non-fatal): %s", filing_id, exc)
+
     # Parse
     transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
     if not transactions:
@@ -255,7 +288,6 @@ def _process_filing_with_ledger(
     # Upsert transactions
     tx_inserted = 0
     tx_dedup    = 0
-    pdf_sha256  = transactions[0].raw_document_sha256 if transactions else None
 
     for tx in transactions:
         result = upsert_transaction(
