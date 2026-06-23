@@ -2,26 +2,50 @@ name: InsideWatch Scraper
 
 on:
   schedule:
-    # Tier 1 (FTSE MIB, ~40 co.) — every 15 min on weekdays during Italian market hours
-    - cron: '*/15 8-17 * * 1-5'
-    # Tier 2 (Mid Cap, ~60 co.) — top of every hour on weekdays
-    - cron: '0 8-17 * * 1-5'
-    # Tier 3 (all remaining) — three times a day on weekdays
-    - cron: '0 7,12,17 * * 1-5'
+    # ── Listener (lightweight, near-real-time) ──────────────────────────────
+    # Runs every minute during Italian market hours (Mon–Fri, 08:00–18:00 UTC).
+    # NOTE: GitHub's scheduler has a real-world delivery latency of 5–15 min
+    # at peak times.  For sub-5-minute latency move to a self-hosted runner.
+    - cron: '*/1 8-18 * * 1-5'
+
+    # ── Full sweep (catch-up / historical backfill) ─────────────────────────
+    # Runs once daily at 07:00 UTC to catch any filings the listener missed
+    # (e.g. during GitHub scheduling delays or overnight filings).
+    - cron: '0 7 * * 1-5'
+
+    # ── Daily review queue summary ───────────────────────────────────────────
+    # Sends a digest of pending transactions, failed filings, and unmatched
+    # issuers at 17:30 UTC (end of Italian market day).
+    - cron: '30 17 * * 1-5'
+
   workflow_dispatch:
     inputs:
+      job:
+        description: 'Which job to run'
+        required: false
+        default: 'listener'
+        type: choice
+        options: ['listener', 'sweep', 'review-summary']
       tier:
-        description: 'Max priority tier (1=FTSE MIB only, 2=+Mid Cap, 3=all)'
+        description: 'Sweep only — max priority tier (1=FTSE MIB, 2=+Mid Cap, 3=all)'
         required: false
         default: '1'
         type: choice
         options: ['1', '2', '3']
 
+# ── Shared Python setup ───────────────────────────────────────────────────────
+
 jobs:
-  scrape:
-    name: Scrape (tier ${{ github.event.inputs.tier || 'auto' }})
+
+  # ── Job 1: Listener ─────────────────────────────────────────────────────────
+  listener:
+    name: Listener (new filings check)
+    # Run on every-minute cron OR when manually triggered with job=listener
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'listener'
+      || github.event.schedule == '*/1 8-18 * * 1-5'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 3
 
     steps:
       - name: Checkout
@@ -37,21 +61,59 @@ jobs:
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt
 
-      - name: Determine tier and flags
-        id: tier
+      # Restore the most-recently-saved listener cache file across runs.
+      # Key changes every run (so the current run's output is always saved);
+      # restore-keys matches any previously saved cache from this job.
+      - name: Restore listener URL cache
+        uses: actions/cache@v4
+        with:
+          path: scraper/recent_scrapes.json
+          key: listener-cache-${{ github.run_id }}
+          restore-keys: |
+            listener-cache-
+
+      - name: Run listener
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python3 -m scraper.run_listener
+
+  # ── Job 2: Full sweep ───────────────────────────────────────────────────────
+  sweep:
+    name: Full sweep (tier ${{ github.event.inputs.tier || '3' }})
+    # Run on the daily 07:00 cron OR when manually triggered with job=sweep
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'sweep'
+      || github.event.schedule == '0 7 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Determine sweep flags
+        id: flags
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TIER="${{ github.event.inputs.tier }}"
-          elif [[ "${{ github.event.schedule }}" == "0 7,12,17 * * 1-5" ]]; then
-            TIER="3"
-          elif [[ "${{ github.event.schedule }}" == "0 8-17 * * 1-5" ]]; then
-            TIER="2"
-          else
-            TIER="1"
-          fi
+          TIER="${{ github.event.inputs.tier || '3' }}"
           echo "max_tier=$TIER" >> "$GITHUB_OUTPUT"
-          # Tier 1: fast (1s delay, 3 concurrent workers) to finish in <10 min
-          # Tier 2/3: polite (2s delay, 1 worker) — fewer runs, less pressure
+          # Tier 1: fast (1 s delay, 3 concurrent workers)
+          # Tier 2/3: polite (2 s delay, 1 worker)
           if [[ "$TIER" == "1" ]]; then
             echo "delay=1.0" >> "$GITHUB_OUTPUT"
             echo "workers=3" >> "$GITHUB_OUTPUT"
@@ -60,16 +122,50 @@ jobs:
             echo "workers=1" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run scraper
+      - name: Run full sweep
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: |
           python3 -m scraper.run_phase2 \
-            --tier ${{ steps.tier.outputs.max_tier }} \
-            --delay ${{ steps.tier.outputs.delay }} \
-            --workers ${{ steps.tier.outputs.workers }} \
+            --tier ${{ steps.flags.outputs.max_tier }} \
+            --delay ${{ steps.flags.outputs.delay }} \
+            --workers ${{ steps.flags.outputs.workers }} \
             --max-pdfs 15
+
+  # ── Job 3: Daily review queue summary ─────────────────────────────────────
+  review-summary:
+    name: Daily review queue summary
+    if: >
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'review-summary'
+      || github.event.schedule == '30 17 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Send review summary
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+        run: python3 -m scraper.generate_review_summary

@@ -1,15 +1,29 @@
 export type Direction = "buy" | "sell" | "unknown";
 
+// Full Phase 7 taxonomy (16 values). See docs/CLASSIFICATION_TAXONOMY.md.
+// Discretionary: buy | sell | subscription
+// Mechanical:    grant | option_exercise | sell_to_cover | conversion |
+//                inheritance | gift_in | gift_out | transfer_in | transfer_out |
+//                pledge_or_security | derivative_transaction
+// Unclear:       other (understood but outside taxonomy) | unknown (undetermined)
 export type TransactionType =
   | "buy"
   | "sell"
   | "grant"
   | "option_exercise"
   | "sell_to_cover"
-  | "other";
+  | "subscription"
+  | "conversion"
+  | "inheritance"
+  | "gift_in"
+  | "gift_out"
+  | "transfer_in"
+  | "transfer_out"
+  | "pledge_or_security"
+  | "derivative_transaction"
+  | "other"
+  | "unknown";
 
-// Phase 7 will expand this to the full taxonomy (open_market_buy, vesting, etc.)
-// and migrate existing values. For now these three cover all live records.
 export type EconomicIntent = "discretionary" | "mechanical" | "unclear";
 
 export type ReviewStatus =
@@ -74,9 +88,17 @@ export interface Transaction {
   extraction_confidence: number | null;    // 0.0–1.0
   classification_confidence: number | null; // 0.0–1.0
 
+  // Classification Phase 7
+  classification_rationale: string | null;
+  raw_nature_text: string | null;
+  classification_override: boolean;
+  classification_overridden_by: string | null;
+  classification_overridden_at: string | null;
+
   // Review workflow
   review_status: ReviewStatus | null;
   review_reason: string | null;
+  review_notes: string | null;
 
   // Parser provenance
   parser_version: string | null; // '0.0.0' = legacy, '1.x.x' = Phase 1+
