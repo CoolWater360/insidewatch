@@ -34,6 +34,11 @@ from .models import ParsedTransaction
 
 logger = logging.getLogger(__name__)
 
+# Increment this when the parser logic changes in a way that may produce
+# different output from the same PDF.  Format: '<major>.<minor>.<patch>'
+# Legacy records (pre-Phase 1) are labelled '0.0.0' via migration 001.
+PARSER_VERSION = "1.0.0"
+
 # ─── Direction + transaction-type lookup ─────────────────────────────────────
 # Maps keyword → (direction, transaction_type).
 # direction:        buy | sell | unknown
@@ -489,6 +494,94 @@ def _compute_hash(
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+# ─── New field calculators ────────────────────────────────────────────────────
+
+def _compute_economic_intent(transaction_type: str) -> str:
+    """
+    Map transaction_type → economic_intent.
+    discretionary = the insider chose to transact; mechanical = automatic/contractual.
+    Kept separate from transaction_type so signal logic can filter precisely.
+    """
+    if transaction_type in ("buy", "sell"):
+        return "discretionary"
+    if transaction_type in ("grant", "option_exercise", "sell_to_cover"):
+        return "mechanical"
+    return "unclear"
+
+
+def _compute_extraction_confidence(
+    insider_name: Optional[str],
+    company: Optional[str],
+    tx_date: Optional[str],
+    quantity: float,
+    unit_price: float,
+    transaction_type: str,
+    parse_warnings: list[str],
+) -> float:
+    """
+    Rule-based extraction confidence score (0.0–1.0).
+    Penalises each required field that was not successfully extracted.
+    Phase 5 will replace this with per-field granular scoring.
+    """
+    score = 1.0
+    if not insider_name or insider_name == "Unknown":
+        score -= 0.25
+    if not company or company == "Unknown":
+        score -= 0.25
+    if not tx_date:
+        score -= 0.25
+    # Zero qty/price is expected for grants; penalise only for non-grants
+    if quantity == 0 and transaction_type != "grant":
+        score -= 0.15
+    if unit_price == 0 and transaction_type != "grant":
+        score -= 0.10
+    # Each warning is a signal of extraction difficulty (cap at 4 penalties)
+    score -= min(len(parse_warnings), 4) * 0.05
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_classification_confidence(
+    direction: str,
+    transaction_type: str,
+    si_yes_fallback: bool,
+) -> float:
+    """
+    Rule-based classification confidence score (0.0–1.0).
+    Measures how certain we are that direction and transaction_type are correct.
+    """
+    score = 1.0
+    if direction == "unknown":
+        score -= 0.5
+    if si_yes_fallback:
+        score -= 0.30
+    if transaction_type == "other":
+        score -= 0.20
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_review_reason(
+    direction: str,
+    transaction_type: str,
+    si_yes_fallback: bool,
+    name_truncated: bool,
+    company: Optional[str],
+) -> Optional[str]:
+    """
+    Return a single structured tag string explaining the primary review trigger,
+    or None if no review is needed.  Tags are stable identifiers — do not change
+    existing tag strings as they may be stored in the database.
+    """
+    if direction == "unknown" and transaction_type != "grant":
+        return "ambiguous_direction"
+    if si_yes_fallback:
+        return "si_yes_inferred"
+    if name_truncated:
+        return "truncated_name"
+    if not company or company == "Unknown":
+        return "missing_issuer"
+    return None
+
+
 # ─── Transaction block splitter ───────────────────────────────────────────────
 
 def _split_transaction_blocks(text: str) -> tuple[str, list[str]]:
@@ -527,6 +620,10 @@ def parse_pdf(
     multiple transactions for different dates/venues/instruments).
     On any per-transaction parse error, logs a warning and continues.
     """
+    # Compute document hash once for all transactions from this PDF.
+    # Used for integrity verification and Phase 4 re-parse idempotency.
+    doc_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+
     try:
         full_text = extract_text(pdf_bytes)
     except Exception as exc:
@@ -592,6 +689,21 @@ def parse_pdf(
                 or name_truncated
             )
 
+            # Derived fields (new in Phase 1)
+            economic_intent = _compute_economic_intent(transaction_type)
+            extraction_conf = _compute_extraction_confidence(
+                insider_name, company, tx_date, quantity, unit_price,
+                transaction_type, all_warnings,
+            )
+            classification_conf = _compute_classification_confidence(
+                direction, transaction_type, si_yes_fallback,
+            )
+            review_status = "pending_review" if needs_review else "confirmed"
+            review_reason = _compute_review_reason(
+                direction, transaction_type, si_yes_fallback,
+                name_truncated, company,
+            )
+
             raw_hash = _compute_hash(
                 insider_name or "",
                 company or "",
@@ -618,7 +730,15 @@ def parse_pdf(
                 insider_verified=assessment["verified"],
                 role_category=assessment["role_category"],
                 transaction_type=transaction_type,
+                economic_intent=economic_intent,
                 needs_review=needs_review,
+                extraction_confidence=extraction_conf,
+                classification_confidence=classification_conf,
+                review_status=review_status,
+                review_reason=review_reason,
+                source_transaction_index=i,
+                raw_document_sha256=doc_sha256,
+                parser_version=PARSER_VERSION,
                 parse_warnings=all_warnings,
             ))
 

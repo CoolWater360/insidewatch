@@ -16,14 +16,33 @@ _SUPABASE_TIMEOUT = httpx.Timeout(20.0)
 
 
 def get_supabase_client() -> Client:
-    """Initialize and return Supabase client from environment variables."""
+    """
+    Initialize and return a Supabase client for backend (write) operations.
+
+    Key selection order:
+      1. SUPABASE_SERVICE_ROLE_KEY — bypasses RLS; required once RLS is enabled.
+      2. SUPABASE_KEY              — anon key fallback; works only while RLS is disabled.
+
+    IMPORTANT: Never expose SUPABASE_SERVICE_ROLE_KEY to the Next.js frontend.
+    Set it only as a GitHub Actions secret and in the local Python scraper env.
+    """
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
+    # Prefer service-role key; fall back to anon key while RLS is still disabled.
+    # Remove the anon-key fallback once RLS is enabled (Phase 1 manual step).
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 
     if not url or not key:
         raise ValueError(
-            "SUPABASE_URL and SUPABASE_KEY environment variables are required. "
-            "Set them in .env.local or your shell environment."
+            "SUPABASE_URL and either SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY "
+            "are required. Set them in .env.local or as GitHub Actions secrets."
+        )
+
+    if os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+        logger.debug("Supabase client: service_role key")
+    else:
+        logger.warning(
+            "Supabase client using anon key — write operations require RLS to be "
+            "disabled. Set SUPABASE_SERVICE_ROLE_KEY before enabling RLS."
         )
 
     client = create_client(url, key)
@@ -176,15 +195,30 @@ def upsert_transaction(
     total_value: float,
     currency: str,
     source_url: str,
+    # ── Classification ────────────────────────────────────────────────────────
     insider_verified: bool = True,
     role_category: str = "other",
     transaction_type: str = "buy",
+    economic_intent: str = "unclear",
+    # ── Quality flags ─────────────────────────────────────────────────────────
     needs_review: bool = False,
+    extraction_confidence: Optional[float] = None,
+    classification_confidence: Optional[float] = None,
+    # ── Review workflow ───────────────────────────────────────────────────────
+    review_status: Optional[str] = None,
+    review_reason: Optional[str] = None,
+    # ── Source lineage ────────────────────────────────────────────────────────
+    source_transaction_index: Optional[int] = None,
+    raw_document_sha256: Optional[str] = None,
+    source_filing_id: Optional[int] = None,
+    # ── Parser metadata ───────────────────────────────────────────────────────
+    parser_version: Optional[str] = None,
 ) -> dict:
     """
     Insert or skip a transaction based on raw_hash deduplication.
 
-    Returns: {'inserted': bool, 'transaction_id': int or None, 'message': str}
+    Returns: {'inserted': bool, 'transaction_id': int or None,
+              'company_id': int or None, 'insider_id': int or None, 'message': str}
     """
     try:
         # Fast-path dedup check
@@ -201,23 +235,45 @@ def upsert_transaction(
         company_id = _resolve_company(client, company_name, isin)
         insider_id = _resolve_insider(client, insider_name, insider_role, company_id, insider_verified, role_category)
 
-        tx = client.table("transactions").insert({
-            "insider_id": insider_id,
-            "company_id": company_id,
-            "transaction_date": transaction_date,
-            "filed_date": filed_date,
-            "direction": direction,
-            "instrument_type": instrument_type,
-            "isin": isin,
-            "quantity": quantity,
-            "unit_price": unit_price,
-            "total_value": total_value,
-            "currency": currency,
-            "source_url": source_url,
-            "raw_hash": raw_hash,
-            "transaction_type": transaction_type,
-            "needs_review": needs_review,
-        }).execute()
+        # Derive review_status from needs_review if not explicitly passed
+        _review_status = review_status or ("pending_review" if needs_review else "confirmed")
+
+        payload: dict = {
+            "insider_id":               insider_id,
+            "company_id":               company_id,
+            "transaction_date":         transaction_date,
+            "filed_date":               filed_date,
+            "direction":                direction,
+            "instrument_type":          instrument_type,
+            "isin":                     isin,
+            "quantity":                 quantity,
+            "unit_price":               unit_price,
+            "total_value":              total_value,
+            "currency":                 currency,
+            "source_url":               source_url,
+            "raw_hash":                 raw_hash,
+            "transaction_type":         transaction_type,
+            "economic_intent":          economic_intent,
+            "needs_review":             needs_review,
+            "review_status":            _review_status,
+            "parser_version":           parser_version or "1.0.0",
+        }
+        # Include optional lineage + quality fields only when set — avoids
+        # overwriting DB-level defaults with None for callers that don't compute them.
+        if extraction_confidence is not None:
+            payload["extraction_confidence"] = extraction_confidence
+        if classification_confidence is not None:
+            payload["classification_confidence"] = classification_confidence
+        if review_reason is not None:
+            payload["review_reason"] = review_reason
+        if source_transaction_index is not None:
+            payload["source_transaction_index"] = source_transaction_index
+        if raw_document_sha256 is not None:
+            payload["raw_document_sha256"] = raw_document_sha256
+        if source_filing_id is not None:
+            payload["source_filing_id"] = source_filing_id
+
+        tx = client.table("transactions").insert(payload).execute()
 
         return {
             "inserted": True,

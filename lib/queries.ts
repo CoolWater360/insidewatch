@@ -70,9 +70,12 @@ export async function getTransactions(
   let query = supabase
     .from("transactions")
     .select(SELECT_WITH_RELATIONS, { count: "exact" })
-    // Exclude non-cash corporate awards — not discretionary market transactions
-    .neq("transaction_type", "grant")
-    .neq("transaction_type", "option_exercise");
+    // Exclude non-cash corporate awards (grants, option exercises).
+    // IMPORTANT: PostgREST .neq() generates `col <> value` which evaluates to
+    // NULL (not TRUE) when col IS NULL, silently dropping any legacy rows whose
+    // transaction_type was not set. Use .or() with an explicit IS NULL arm so
+    // legacy records are always included.
+    .or("transaction_type.is.null,transaction_type.not.in.(grant,option_exercise)");
 
   if (filters.companyId) query = query.eq("company_id", filters.companyId);
   if (filters.direction) query = query.eq("direction", filters.direction);

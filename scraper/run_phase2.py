@@ -109,7 +109,15 @@ def _crawl_company(
                     insider_verified=tx.insider_verified,
                     role_category=tx.role_category,
                     transaction_type=tx.transaction_type,
+                    economic_intent=tx.economic_intent,
                     needs_review=tx.needs_review,
+                    extraction_confidence=tx.extraction_confidence,
+                    classification_confidence=tx.classification_confidence,
+                    review_status=tx.review_status,
+                    review_reason=tx.review_reason,
+                    source_transaction_index=tx.source_transaction_index,
+                    raw_document_sha256=tx.raw_document_sha256,
+                    parser_version=tx.parser_version,
                 )
                 if result["inserted"]:
                     stats["inserted"] += 1

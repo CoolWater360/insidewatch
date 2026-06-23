@@ -1,7 +1,14 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-// Read server-side credentials (shared with the Python scraper's .env.local).
-// Falls back to the conventional NEXT_PUBLIC_* names if those are used instead.
+// ── Frontend Supabase client — ANON KEY ONLY ──────────────────────────────────
+// This client is used exclusively for read operations from Next.js server
+// components.  It must always use the anon/public key.
+//
+// IMPORTANT: Do NOT substitute SUPABASE_SERVICE_ROLE_KEY here, even server-side.
+// The service-role key lives only in the Python scraper environment and GitHub
+// Actions secrets (SUPABASE_SERVICE_ROLE_KEY).  See .env.local.example.
+//
+// Falls back to the conventional NEXT_PUBLIC_* names if preferred.
 const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.SUPABASE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
