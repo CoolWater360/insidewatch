@@ -428,14 +428,17 @@ def record_storage(
     (sha256-based) and all values are idempotent: writing the same metadata
     twice is safe.
 
-    Non-fatal: the caller should log and continue if this raises.
+    Raises RuntimeError if the DB update fails.  Callers must treat this as a
+    fatal error: mark the filing failed and do not proceed to parse/complete.
     """
-    client.table("filings").update({
+    result = client.table("filings").update({
         "storage_path":       storage_path,
         "file_size_bytes":    file_size_bytes,
         "raw_extracted_text": raw_extracted_text,
         "updated_at":         _now(),
     }).eq("id", filing_id).execute()
+    if getattr(result, "error", None):
+        raise RuntimeError(f"record_storage DB error for filing {filing_id}: {result.error}")
     logger.debug(
         "Filing %d: storage recorded — %s (%d bytes)", filing_id, storage_path, file_size_bytes
     )

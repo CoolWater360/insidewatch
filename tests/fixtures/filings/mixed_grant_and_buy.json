@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "id": "mixed_grant_and_buy",
+    "description": "Mixed filing: one zero-price grant (ASSEGNAZIONE) followed by one open-market buy (ACQUISTO). Verifies classifier independently classifies each transaction block.",
+    "layout": 1
+  },
+  "raw_text": "AVVISO n.3344 del 20 Giugno 2024\nMittente del comunicato : Pirelli & C. S.p.A.\nOggetto : Internal dealing - comunicazione ai sensi dell'art. 19 del Regolamento UE\n\nSEZIONE 1\nDati relativi alla persona che esercita funzioni di amministrazione\na)\nNome: Carlo Cognome: Bianchi\nRuolo: Persona che esercita funzioni di amministrazione\nRole: Person exercising managerial responsibilities\n\nOperazione - 1\nTransaction - 1\nISIN: IT0005278236\nDescription of the Azioni Ordinarie\nNatura dell'operazione\nASSEGNAZIONE\nA norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n\nPrice(s) and Volume(s)\n0.00 EUR 3000\n\nInformazioni aggregate\nVolume aggregato: 3000\nPrezzo: 0.00 EUR\n\nData dell'operazione 2024-06-18\n\nOperazione - 2\nTransaction - 2\nISIN: IT0005278236\nDescription of the Azioni Ordinarie\nNatura dell'operazione\nACQUISTO\nPURCHASE\nA norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n\nPrice(s) and Volume(s)\n5.62 EUR 1000\n\nInformazioni aggregate\nVolume aggregato: 1000\nPrezzo: 5.62 EUR\n\nData dell'operazione 2024-06-19\n",
+  "source_url": "https://example.com/filing/mixed_grant_and_buy.pdf",
+  "filing_date": "2024-06-20",
+  "expected": {
+    "count": 2,
+    "transactions": [
+      {
+        "insider_name": "Carlo Bianchi",
+        "company_name": "Pirelli & C. S.p.A.",
+        "isin": "IT0005278236",
+        "direction": "buy",
+        "transaction_type": "grant",
+        "transaction_date": "2024-06-18",
+        "quantity": 3000.0,
+        "unit_price": 0.0,
+        "needs_review": false,
+        "min_extraction_confidence": 0.75
+      },
+      {
+        "insider_name": "Carlo Bianchi",
+        "company_name": "Pirelli & C. S.p.A.",
+        "isin": "IT0005278236",
+        "direction": "buy",
+        "transaction_type": "buy",
+        "transaction_date": "2024-06-19",
+        "quantity": 1000.0,
+        "unit_price": 5.62,
+        "needs_review": false,
+        "min_extraction_confidence": 0.85
+      }
+    ]
+  }
+}

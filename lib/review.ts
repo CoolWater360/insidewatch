@@ -47,9 +47,8 @@ export interface ReviewFiling {
 export interface UnmatchedIssuer {
   id: number;
   raw_name: string;
-  isin: string | null;
+  raw_isin: string | null;
   status: string;
-  suggestion_canonical_name: string | null;
   suggestion_issuer_id: number | null;
   created_at: string;
 }
@@ -180,7 +179,7 @@ export async function getUnmatchedIssuers(
   const { data, count, error } = await db
     .from("unmatched_issuers")
     .select(
-      "id, raw_name, isin, status, suggestion_canonical_name, suggestion_issuer_id, created_at",
+      "id, raw_name, raw_isin, status, suggestion_issuer_id, created_at",
       { count: "exact" }
     )
     .eq("status", "pending")

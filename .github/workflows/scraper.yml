@@ -51,6 +51,12 @@ jobs:
       || github.event.schedule == '*/1 8-18 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    # Allow up to 3 concurrent listener runs (one per minute × 3-minute timeout).
+    # cancel-in-progress: false ensures each run completes; the DB claim-token
+    # prevents two runners from processing the same filing simultaneously.
+    concurrency:
+      group: scraper-listener
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -98,6 +104,11 @@ jobs:
       || github.event.schedule == '0 7 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Only one sweep at a time; a second trigger queues rather than cancels the
+    # running sweep so no filings are silently dropped mid-crawl.
+    concurrency:
+      group: scraper-sweep
+      cancel-in-progress: false
 
     steps:
       - name: Checkout

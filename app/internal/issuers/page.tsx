@@ -41,19 +41,14 @@ export default async function UnmatchedIssuersPage({ searchParams }: Props) {
                     <div className="font-medium text-[#E8EDF7]">
                       {issuer.raw_name}
                     </div>
-                    {issuer.isin && (
+                    {issuer.raw_isin && (
                       <div className="font-mono text-xs text-muted">
-                        ISIN: {issuer.isin}
+                        ISIN: {issuer.raw_isin}
                       </div>
                     )}
-                    {issuer.suggestion_canonical_name && (
+                    {issuer.suggestion_issuer_id && (
                       <div className="text-xs text-amber-300">
-                        Suggestion: {issuer.suggestion_canonical_name}
-                        {issuer.suggestion_issuer_id && (
-                          <span className="ml-1 text-muted">
-                            (issuer #{issuer.suggestion_issuer_id})
-                          </span>
-                        )}
+                        Suggestion: issuer #{issuer.suggestion_issuer_id}
                       </div>
                     )}
                     <div className="text-xs text-muted">

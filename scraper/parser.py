@@ -695,7 +695,8 @@ def parse_text(
 
             si_yes_fallback = any("SI/YES flag" in w for w in dir_warns)
             needs_review = (
-                (direction == "unknown" and transaction_type != "grant")
+                clf.needs_review                                     # classifier flagged uncertainty
+                or (direction == "unknown" and transaction_type != "grant")
                 or si_yes_fallback
                 or name_truncated
             )

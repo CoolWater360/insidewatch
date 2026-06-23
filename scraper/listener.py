@@ -264,8 +264,8 @@ def _process_filing_with_ledger(
         )
         raise RuntimeError(f"Filing {filing_id}: PDF storage failed — {exc}") from exc
 
-    # Record storage metadata (non-fatal: storage_path already written; metadata
-    # can be recovered on the next run if this update fails).
+    # Record storage metadata — fatal: a filing must not parse/complete without
+    # confirmed ledger persistence of its storage lineage.
     raw_text = doc_storage.extract_raw_text(pdf_bytes)
     try:
         filing_ledger.record_storage(
@@ -275,7 +275,14 @@ def _process_filing_with_ledger(
             raw_extracted_text=raw_text or None,
         )
     except Exception as exc:
-        logger.warning("Filing %d: record_storage failed (non-fatal): %s", filing_id, exc)
+        filing_ledger.fail_filing(
+            client, filing_id,
+            error=f"record_storage failed: {exc}",
+            attempt_count=attempt_count,
+            max_attempts=max_attempts,
+            claim_token=claim_token,
+        )
+        raise RuntimeError(f"Filing {filing_id}: record_storage failed — {exc}") from exc
 
     # Parse
     transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)

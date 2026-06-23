@@ -6,9 +6,11 @@ Currently sends email via Resend.  Telegram seam is stubbed — add it
 by uncommenting the import and call at the bottom of dispatch().
 
 Required env vars:
-  RESEND_API_KEY     — Resend secret key
-  ALERT_EMAIL        — comma-separated recipient addresses
-  ALERT_FROM_EMAIL   — verified sender (e.g. "InsideWatch <alerts@yourdomain.com>")
+  RESEND_API_KEY       — Resend secret key
+  ALERT_EMAIL          — comma-separated recipient addresses
+  ALERT_FROM_EMAIL     — verified sender (e.g. "InsideWatch <alerts@yourdomain.com>")
+  TELEGRAM_BOT_TOKEN   — Telegram bot token from @BotFather
+  TELEGRAM_CHANNEL_ID  — Channel username or numeric chat ID
 """
 
 import logging
@@ -251,6 +253,6 @@ def dispatch(payload: AlertPayload, client, company_tier: int) -> None:
     # ── Email (active) ───────────────────────────────────────────────────────
     send_email(payload, cluster)
 
-    # ── Telegram (Phase 4 seam) ──────────────────────────────────────────────
-    # from .telegram import send_telegram
-    # send_telegram(payload, cluster)
+    # ── Telegram ────────────────────────────────────────────────────────────
+    from .telegram import send_telegram
+    send_telegram(payload, cluster)

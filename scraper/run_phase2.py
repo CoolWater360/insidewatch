@@ -179,9 +179,18 @@ def _crawl_company(
                             raw_extracted_text=raw_text or None,
                         )
                     except Exception as exc:
-                        logger.warning(
-                            "Filing %d: record_storage failed (non-fatal): %s", filing_id, exc
+                        logger.error(
+                            "Filing %d: record_storage failed — marking failed: %s", filing_id, exc
                         )
+                        filing_ledger.fail_filing(
+                            client, filing_id,
+                            error=f"record_storage failed: {exc}",
+                            attempt_count=attempt_count,
+                            max_attempts=max_attempts,
+                            claim_token=claim_token,
+                        )
+                        stats["errors"] += 1
+                        continue
                 except Exception as exc:
                     logger.error("Filing %d: PDF storage failed: %s", filing_id, exc)
                     filing_ledger.fail_filing(
