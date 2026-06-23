@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Increment this when the parser logic changes in a way that may produce
 # different output from the same PDF.  Format: '<major>.<minor>.<patch>'
 # Legacy records (pre-Phase 1) are labelled '0.0.0' via migration 001.
-PARSER_VERSION = "1.0.0"
+PARSER_VERSION = "1.1.0"
 
 # ─── Direction + transaction-type lookup ─────────────────────────────────────
 # Maps keyword → (direction, transaction_type).
@@ -517,26 +517,36 @@ def _compute_extraction_confidence(
     unit_price: float,
     transaction_type: str,
     parse_warnings: list[str],
+    isin: Optional[str] = None,
 ) -> float:
     """
-    Rule-based extraction confidence score (0.0–1.0).
-    Penalises each required field that was not successfully extracted.
-    Phase 5 will replace this with per-field granular scoring.
+    Per-field extraction confidence score (0.0–1.0).
+
+    Weights:
+      insider_name present and not "Unknown"  +0.25
+      company present and not "Unknown"       +0.15
+      transaction_date extracted              +0.25
+      quantity > 0 (or grant)                 +0.15
+      unit_price > 0 (or grant)               +0.10
+      isin present                            +0.10
+    Penalty:
+      Each "Could not" / fallback warning     -0.04  (max 3 penalties)
     """
-    score = 1.0
-    if not insider_name or insider_name == "Unknown":
-        score -= 0.25
-    if not company or company == "Unknown":
-        score -= 0.25
-    if not tx_date:
-        score -= 0.25
-    # Zero qty/price is expected for grants; penalise only for non-grants
-    if quantity == 0 and transaction_type != "grant":
-        score -= 0.15
-    if unit_price == 0 and transaction_type != "grant":
-        score -= 0.10
-    # Each warning is a signal of extraction difficulty (cap at 4 penalties)
-    score -= min(len(parse_warnings), 4) * 0.05
+    score = 0.0
+    if insider_name and insider_name != "Unknown":
+        score += 0.25
+    if company and company != "Unknown":
+        score += 0.15
+    if tx_date:
+        score += 0.25
+    if quantity > 0 or transaction_type == "grant":
+        score += 0.15
+    if unit_price > 0 or transaction_type == "grant":
+        score += 0.10
+    if isin:
+        score += 0.10
+    hard_warnings = [w for w in parse_warnings if "Could not" in w or "fallback" in w.lower()]
+    score -= min(len(hard_warnings), 3) * 0.04
     return round(max(0.0, min(1.0, score)), 3)
 
 
@@ -606,43 +616,33 @@ def _split_transaction_blocks(text: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
-# ─── Main entry point ────────────────────────────────────────────────────────
+# ─── Main entry points ───────────────────────────────────────────────────────
 
-def parse_pdf(
-    pdf_bytes: bytes,
+def parse_text(
+    full_text: str,
     source_url: str,
     filing_date: str,
+    doc_sha256: str = "",
 ) -> list[ParsedTransaction]:
     """
-    Parse a MAR Art 19 PDF notification.
+    Parse extracted text from a MAR Art 19 notification.
 
-    Returns a list of ParsedTransaction objects (one PDF can contain
-    multiple transactions for different dates/venues/instruments).
-    On any per-transaction parse error, logs a warning and continues.
+    Accepts raw text (from extract_text or a fixture) so regression tests can
+    exercise the full parsing pipeline without needing PDF binary files.
+
+    Returns a list of ParsedTransaction objects.  On any per-transaction error,
+    logs a warning and continues so a bad block never aborts the whole filing.
     """
-    # Compute document hash once for all transactions from this PDF.
-    # Used for integrity verification and Phase 4 re-parse idempotency.
-    doc_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
-
-    try:
-        full_text = extract_text(pdf_bytes)
-    except Exception as exc:
-        logger.error("Failed to extract text from %s: %s", source_url, exc)
-        return []
-
     header, tx_blocks = _split_transaction_blocks(full_text)
 
-    # Extract header-level fields shared across all transactions in this PDF
     company, company_warns = _parse_company(header + tx_blocks[0] if tx_blocks else header)
     insider_name, name_warns = _parse_insider_name(header + (tx_blocks[0] if tx_blocks else ""))
     role, role_warns = _parse_role(header + (tx_blocks[0] if tx_blocks else ""))
 
-    # Normalise and verify insider
     if insider_name:
         insider_name = normalize_name(insider_name)
     assessment = assess_insider(insider_name or "", role)
 
-    # Detect likely-truncated names: single word (no space) that isn't "Unknown"
     name_truncated = bool(
         insider_name
         and insider_name != "Unknown"
@@ -671,17 +671,14 @@ def parse_pdf(
                 logger.warning("No date in transaction %d of %s — skipping", tx_num, source_url)
                 continue
 
-            # total_value: for bonds price is in %, so actual EUR = qty * (price/100)
             if "%" in currency or _is_percentage_price(block):
                 total_value = quantity * (unit_price / 100.0)
             else:
                 total_value = quantity * unit_price
 
-            # Zero-price rows are non-cash grants regardless of direction detection
             if unit_price == 0 and total_value == 0 and quantity > 0:
                 transaction_type = "grant"
 
-            # needs_review: unresolved direction, weak SI/YES guess, or truncated name
             si_yes_fallback = any("SI/YES flag" in w for w in dir_warns)
             needs_review = (
                 (direction == "unknown" and transaction_type != "grant")
@@ -689,11 +686,10 @@ def parse_pdf(
                 or name_truncated
             )
 
-            # Derived fields (new in Phase 1)
             economic_intent = _compute_economic_intent(transaction_type)
             extraction_conf = _compute_extraction_confidence(
                 insider_name, company, tx_date, quantity, unit_price,
-                transaction_type, all_warnings,
+                transaction_type, all_warnings, isin=isin,
             )
             classification_conf = _compute_classification_confidence(
                 direction, transaction_type, si_yes_fallback,
@@ -752,6 +748,29 @@ def parse_pdf(
             )
 
     return results
+
+
+def parse_pdf(
+    pdf_bytes: bytes,
+    source_url: str,
+    filing_date: str,
+) -> list[ParsedTransaction]:
+    """
+    Parse a MAR Art 19 PDF notification.
+
+    Computes the document SHA-256, extracts text, then delegates to parse_text.
+    The SHA-256 is embedded in every returned transaction for Phase 4 re-parse
+    idempotency and Phase 3 storage integrity.
+    """
+    doc_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+
+    try:
+        full_text = extract_text(pdf_bytes)
+    except Exception as exc:
+        logger.error("Failed to extract text from %s: %s", source_url, exc)
+        return []
+
+    return parse_text(full_text, source_url, filing_date, doc_sha256=doc_sha256)
 
 
 def _is_percentage_price(tx_block: str) -> bool:

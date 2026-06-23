@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "id": "two_transactions",
+    "description": "Single filing with two transaction blocks — verifies both are extracted independently",
+    "layout": 1
+  },
+  "raw_text": "AVVISO n.9988 del 05 Maggio 2024\nMittente del comunicato : Buzzi S.p.A.\nOggetto : Internal dealing - comunicazione ai sensi dell'art. 19 del Regolamento UE\n\nSEZIONE 1\nDati relativi alla persona che esercita funzioni di amministrazione\na)\nNome: Giuseppe Cognome: Verdi\nRuolo: Persona che esercita funzioni di amministrazione\nRole: Person exercising managerial responsibilities\n\nOperazione - 1\nTransaction - 1\nISIN: IT0001347308\nDescription of the Azioni Ordinarie\nNatura dell'operazione\nACQUISTO\nPURCHASE\nA norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n\nPrice(s) and Volume(s)\n25.10 EUR 200\n\nInformazioni aggregate\nVolume aggregato: 200\nPrezzo: 25.10 EUR\n\nData dell'operazione 2024-05-03\n\nOperazione - 2\nTransaction - 2\nISIN: IT0001347308\nDescription of the Azioni Ordinarie\nNatura dell'operazione\nACQUISTO\nPURCHASE\nA norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n\nPrice(s) and Volume(s)\n25.30 EUR 300\n\nInformazioni aggregate\nVolume aggregato: 300\nPrezzo: 25.30 EUR\n\nData dell'operazione 2024-05-04\n",
+  "source_url": "https://example.com/filing/two_transactions.pdf",
+  "filing_date": "2024-05-05",
+  "expected": {
+    "count": 2,
+    "transactions": [
+      {
+        "insider_name": "Giuseppe Verdi",
+        "company_name": "Buzzi S.p.A.",
+        "isin": "IT0001347308",
+        "direction": "buy",
+        "transaction_type": "buy",
+        "transaction_date": "2024-05-03",
+        "quantity": 200.0,
+        "unit_price": 25.10,
+        "currency": "EUR",
+        "needs_review": false,
+        "min_extraction_confidence": 0.85
+      },
+      {
+        "insider_name": "Giuseppe Verdi",
+        "company_name": "Buzzi S.p.A.",
+        "isin": "IT0001347308",
+        "direction": "buy",
+        "transaction_type": "buy",
+        "transaction_date": "2024-05-04",
+        "quantity": 300.0,
+        "unit_price": 25.30,
+        "currency": "EUR",
+        "needs_review": false,
+        "min_extraction_confidence": 0.85
+      }
+    ]
+  }
+}

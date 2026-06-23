@@ -1,0 +1,27 @@
+{
+  "meta": {
+    "id": "layout2_sell",
+    "description": "Layout 2 (larger company, e.g. Eni) — equity sell with bilingual two-column interleaving",
+    "layout": 2
+  },
+  "raw_text": "AVVISO n.5432 del 10 Marzo 2024\nMittente del comunicato : Eni S.p.A.\nOggetto : Internal dealing - comunicazione ai sensi dell'art. 19 del Regolamento UE\n\nSEZIONE 1a\na) Nome/First Name MARIA BIANCHI\nDati relativi alla persona che esercita funzioni di amministrazione\nPosizione qualifica - PERSONA CHE ESERCITA FUNZIONI DI AMMINISTRAZIONE/PERSON EXERCISING MANAGERIAL RESPONSIBILITIES\n\nOperazione - 1\nNature of the CESSIONE/SALE\nIdentification code XS1234567890\n\nPrice(s) and Volume(s)\n14.20 EUR 2000\n14.18 EUR 3000\n\nAggregated volume — 14.188 EUR 5000\nData dell'operazione 2024-03-09\n",
+  "source_url": "https://example.com/filing/layout2_sell.pdf",
+  "filing_date": "2024-03-10",
+  "expected": {
+    "count": 1,
+    "transactions": [
+      {
+        "insider_name": "Maria Bianchi",
+        "company_name": "Eni S.p.A.",
+        "isin": "XS1234567890",
+        "direction": "sell",
+        "transaction_type": "sell",
+        "transaction_date": "2024-03-09",
+        "quantity": 5000.0,
+        "currency": "EUR",
+        "needs_review": false,
+        "min_extraction_confidence": 0.85
+      }
+    ]
+  }
+}
