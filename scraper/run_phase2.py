@@ -25,6 +25,7 @@ SEED_CSV = os.path.join(_PROJECT_ROOT, "db", "seed_companies.csv")
 from .alerts import AlertPayload, dispatch
 from .db import get_supabase_client, load_seed_companies, upsert_transaction
 from .fetcher import BlockedError, _make_session, iter_company_listings, download_pdf
+from . import filings as filing_ledger
 from .parser import parse_pdf
 
 logging.basicConfig(
@@ -41,16 +42,22 @@ def _crawl_company(
     client,
     polite_delay: float,
     max_pdfs: int,
+    use_ledger: bool = False,
 ) -> dict:
     """
     Crawl a single company in its own requests.Session (thread-safe).
     Returns a stats dict; never raises — errors are captured in the return value.
+
+    use_ledger: when True, registers each PDF in the filings table and uses
+    filing-level dedup (already-completed filings are skipped without downloading).
+    When False, falls back to transaction-level dedup only (pre-Phase-2 behaviour).
     """
     stats = {
         "pdfs": 0,
         "parsed": 0,
         "inserted": 0,
         "dedup": 0,
+        "filing_skipped": 0,
         "errors": 0,
         "skipped": False,
         "skip_reason": None,
@@ -68,25 +75,89 @@ def _crawl_company(
             polite_delay=polite_delay,
         ):
             stats["pdfs"] += 1
+            filing_id: int | None = None
+            attempt_count = 0
+            max_attempts  = 3
 
+            # ── Ledger: register filing and check if already done ─────────────
+            if use_ledger:
+                try:
+                    filing = filing_ledger.register_filing(
+                        client,
+                        pdf_url=row.pdf_url,
+                        filing_date=row.filing_date,
+                        company_name=company_name,
+                    )
+                    filing_id     = filing["id"]
+                    attempt_count = filing.get("attempt_count", 0)
+                    max_attempts  = filing.get("max_attempts", 3)
+
+                    if filing["status"] == "completed":
+                        stats["filing_skipped"] += 1
+                        logger.debug("Filing already completed, skipping: %s", row.pdf_url)
+                        continue
+
+                    if not filing_ledger.is_eligible(filing):
+                        stats["filing_skipped"] += 1
+                        continue
+
+                    filing_ledger.claim_filing(client, filing_id, attempt_count)
+                    attempt_count += 1
+
+                except Exception as exc:
+                    logger.warning("Ledger registration failed for %s: %s — processing anyway", row.pdf_url, exc)
+                    filing_id = None
+
+            # ── Download ──────────────────────────────────────────────────────
             try:
                 pdf_bytes = download_pdf(session, row.pdf_url)
             except BlockedError as exc:
                 logger.warning("BLOCKED PDF for %s: %s", company_name, exc)
+                if use_ledger and filing_id:
+                    filing_ledger.fail_filing(
+                        client, filing_id,
+                        error=f"blocked: {exc}",
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                    )
                 stats["errors"] += 1
                 continue
             except requests.Timeout:
                 logger.warning("TIMEOUT PDF for %s — %s", company_name, row.pdf_url)
+                if use_ledger and filing_id:
+                    filing_ledger.fail_filing(
+                        client, filing_id,
+                        error="timeout downloading PDF",
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                    )
                 stats["errors"] += 1
                 continue
             except Exception as exc:
                 logger.error("Failed to download %s: %s", row.pdf_url, exc)
+                if use_ledger and filing_id:
+                    filing_ledger.fail_filing(
+                        client, filing_id,
+                        error=str(exc),
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                    )
                 stats["errors"] += 1
                 continue
 
+            # ── Parse ─────────────────────────────────────────────────────────
             transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
             if not transactions:
+                if use_ledger and filing_id:
+                    filing_ledger.skip_filing(
+                        client, filing_id, reason="no transactions parsed from PDF"
+                    )
                 continue
+
+            # ── Upsert transactions ───────────────────────────────────────────
+            pdf_sha256  = transactions[0].raw_document_sha256 if transactions else None
+            tx_inserted = 0
+            tx_dedup    = 0
 
             for tx in transactions:
                 stats["parsed"] += 1
@@ -117,11 +188,12 @@ def _crawl_company(
                     review_reason=tx.review_reason,
                     source_transaction_index=tx.source_transaction_index,
                     raw_document_sha256=tx.raw_document_sha256,
+                    source_filing_id=filing_id,   # None when not using ledger
                     parser_version=tx.parser_version,
                 )
                 if result["inserted"]:
                     stats["inserted"] += 1
-                    # Fire alert for verified, non-review Tier 1/2 transactions
+                    tx_inserted += 1
                     if tx.insider_verified and not tx.needs_review and result["company_id"]:
                         try:
                             dispatch(
@@ -148,6 +220,15 @@ def _crawl_company(
                             logger.warning("Alert dispatch error: %s", alert_exc)
                 else:
                     stats["dedup"] += 1
+                    tx_dedup += 1
+
+            if use_ledger and filing_id:
+                filing_ledger.complete_filing(
+                    client, filing_id,
+                    tx_inserted=tx_inserted,
+                    tx_dedup=tx_dedup,
+                    pdf_sha256=pdf_sha256,
+                )
 
             time.sleep(polite_delay)
 
@@ -188,6 +269,15 @@ def run_crawl(
     except ValueError as exc:
         logger.error(str(exc))
         sys.exit(1)
+
+    use_ledger = filing_ledger.table_exists(client)
+    if use_ledger:
+        logger.info("Filing ledger available — filing-level dedup and retry tracking enabled")
+    else:
+        logger.warning(
+            "filings table not found — running without filing ledger. "
+            "Apply db/migrations/002_filings_table.sql to enable."
+        )
 
     logger.info("Connected to Supabase (max_tier=%d, workers=%d)", max_tier, max_workers)
 
@@ -235,7 +325,9 @@ def run_crawl(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_name = {
-            executor.submit(_crawl_company, name, tier, client, polite_delay, max_pdfs_per_company): name
+            executor.submit(
+                _crawl_company, name, tier, client, polite_delay, max_pdfs_per_company, use_ledger
+            ): name
             for name, tier in all_companies
         }
 
