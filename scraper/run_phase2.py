@@ -159,6 +159,10 @@ def _crawl_company(
                 stats["errors"] += 1
                 continue
 
+            # Phase 9: stamp download time for latency measurement.
+            if use_ledger and filing_id:
+                filing_ledger.record_downloaded(client, filing_id)
+
             # ── Store raw PDF — Phase 3 gate ──────────────────────────────────
             pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
             if use_ledger and filing_id and storage_backend is not None:
@@ -200,6 +204,10 @@ def _crawl_company(
                         claim_token=claim_token,
                     )
                 continue
+
+            # Phase 9: stamp parse time for latency measurement.
+            if use_ledger and filing_id:
+                filing_ledger.record_parsed(client, filing_id)
 
             # ── Upsert transactions ───────────────────────────────────────────
             tx_inserted = 0

@@ -69,6 +69,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _source_published_utc(filing_date: Optional[str]) -> Optional[str]:
+    """
+    Estimate the time the source filing was published.
+
+    Borsa Italiana does not expose an exact publication timestamp, so we
+    approximate it as filing_date at 09:00 UTC (conservative estimate within
+    the 08:00–11:00 UTC typical window).  Used only for latency reporting;
+    never treated as precise.
+    """
+    if not filing_date:
+        return None
+    try:
+        d = str(filing_date)[:10]
+        dt = datetime.strptime(d, "%Y-%m-%d").replace(
+            hour=9, minute=0, second=0, tzinfo=timezone.utc
+        )
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
 def _next_retry_after(attempt_count: int) -> str:
     """
     Return the earliest UTC timestamp at which this filing may be retried.
@@ -120,14 +141,17 @@ def register_filing(
         return existing.data[0]
 
     try:
+        now = _now()
         result = client.table("filings").insert({
-            "pdf_url":         pdf_url,
-            "filing_date":     filing_date,
-            "company_name":    company_name,
-            "status":          "pending",
-            "scraper_version": SCRAPER_VERSION,
-            "first_seen_at":   _now(),
-            "updated_at":      _now(),
+            "pdf_url":              pdf_url,
+            "filing_date":          filing_date,
+            "company_name":         company_name,
+            "status":               "pending",
+            "scraper_version":      SCRAPER_VERSION,
+            "first_seen_at":        now,
+            "discovered_utc":       now,
+            "source_published_utc": _source_published_utc(filing_date),
+            "updated_at":           now,
         }).execute()
         logger.debug("Registered new filing: %s", pdf_url)
         return result.data[0]
@@ -270,18 +294,20 @@ def complete_filing(
 
     Returns True on success, False if the lease has been lost.
     """
+    now = _now()
     result = (
         client.table("filings")
         .update({
             "status":                     "completed",
-            "completed_at":               _now(),
+            "completed_at":               now,
+            "delivered_utc":              now,
             "transactions_inserted":      tx_inserted,
             "transactions_skipped_dedup": tx_dedup,
             "pdf_sha256":                 pdf_sha256,
             "last_error":                 None,
             "next_attempt_after":         None,
             "claim_token":                None,   # clear on completion
-            "updated_at":                 _now(),
+            "updated_at":                 now,
         })
         .eq("id", filing_id)
         .eq("claim_token", claim_token)
@@ -413,6 +439,39 @@ def record_storage(
     logger.debug(
         "Filing %d: storage recorded — %s (%d bytes)", filing_id, storage_path, file_size_bytes
     )
+
+
+def record_downloaded(client, filing_id: int) -> None:
+    """
+    Stamp downloaded_utc on the filing row immediately after a successful
+    PDF download.  Non-fatal: the caller should log and continue if this raises.
+    """
+    try:
+        now = _now()
+        client.table("filings").update({
+            "downloaded_utc": now,
+            "updated_at":     now,
+        }).eq("id", filing_id).execute()
+    except Exception as exc:
+        logger.warning("Filing %d: record_downloaded failed (non-fatal): %s", filing_id, exc)
+
+
+def record_parsed(client, filing_id: int) -> None:
+    """
+    Stamp parsed_utc and validated_utc on the filing row immediately after
+    the parser returns transaction records.  Both columns are set to the same
+    moment because parse and basic validation happen in the same step.
+    Non-fatal: the caller should log and continue if this raises.
+    """
+    try:
+        now = _now()
+        client.table("filings").update({
+            "parsed_utc":    now,
+            "validated_utc": now,
+            "updated_at":    now,
+        }).eq("id", filing_id).execute()
+    except Exception as exc:
+        logger.warning("Filing %d: record_parsed failed (non-fatal): %s", filing_id, exc)
 
 
 def get_retryable_filings(client) -> list[dict]:

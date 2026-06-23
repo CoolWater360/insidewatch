@@ -245,6 +245,9 @@ def _process_filing_with_ledger(
         )
         raise
 
+    # Phase 9: stamp download time for latency measurement.
+    filing_ledger.record_downloaded(client, filing_id)
+
     # Store raw PDF — Phase 3 gate: every filing must have a stored document.
     pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
     try:
@@ -276,6 +279,8 @@ def _process_filing_with_ledger(
 
     # Parse
     transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
+    if transactions:
+        filing_ledger.record_parsed(client, filing_id)
     if not transactions:
         filing_ledger.skip_filing(
             client, filing_id,
