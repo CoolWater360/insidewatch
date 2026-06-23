@@ -5,21 +5,44 @@ One row in the filings table represents one PDF document the scraper has
 discovered.  The row tracks the full lifecycle from first discovery to
 successful extraction (or permanent failure).
 
-State machine:
-    pending → in_progress → completed
-                          → failed      (will retry after backoff)
-                          → skipped     (empty PDF, blocked, or max retries hit)
-    failed  → in_progress              (retry)
-    failed  → skipped                  (max retries hit on next fail_filing call)
+State machine
+─────────────
+    pending     → in_progress   claim_filing() won the race
+    in_progress → completed     complete_filing()
+    in_progress → failed        fail_filing(), attempt_count < max_attempts
+    in_progress → skipped       fail_filing(), attempt_count >= max_attempts
+    in_progress → failed        reap_stale_filings(), attempt_count < max_attempts
+    in_progress → skipped       reap_stale_filings(), attempt_count >= max_attempts
+    failed      → in_progress   claim_filing() after backoff window elapsed
+    skipped     → pending       reset_for_retry() (operator CLI only)
 
-All public functions are safe to call from multiple threads/workers as long as
-the underlying Supabase calls are atomic (they are — each is a single RPC call).
-The only race condition is dual-claim on the same filing; this is deliberately
-tolerated because transaction-level deduplication via raw_hash is the final
-arbiter of uniqueness.
+Concurrency model
+─────────────────
+    claim_filing() delegates to the claim_filing() Postgres RPC, which executes
+    a single UPDATE … WHERE … RETURNING *.  PostgreSQL's row-level locking ensures
+    exactly one concurrent caller sees the WHERE clause match and receives a row;
+    all others receive 0 rows (race lost).  Callers MUST check the return value.
+
+    raw_hash deduplication in upsert_transaction() is NOT the concurrency control
+    mechanism for claims — it is a separate idempotency guard for the insert layer.
+
+Stale in_progress recovery
+───────────────────────────
+    A worker crash (runner killed, OOM, timeout) leaves the row in_progress
+    indefinitely without intervention.  reap_stale_filings() transitions stale
+    rows back to failed (or skipped if at max_attempts) and is called at startup
+    and before retry selection.
+
+Changed-PDF detection
+─────────────────────
+    Same-URL content changes are NOT handled automatically. pdf_sha256 is stored
+    at completion time for forensic comparison.  Use the CLI command
+    `python3 -m scraper.cli check-pdf <url-or-id>` to compare a live download
+    against the stored hash.
 """
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -30,6 +53,15 @@ SCRAPER_VERSION = "2.0.0"
 
 # Exponential backoff cap in minutes.
 _MAX_BACKOFF_MINUTES = 60
+
+# How long a filing may remain in_progress before the reaper declares it stale.
+# Override per-deployment with the STALE_CLAIM_MINUTES environment variable.
+_STALE_CLAIM_MINUTES = 30
+
+
+def _stale_minutes() -> int:
+    """Return the configured stale-claim threshold in minutes."""
+    return int(os.getenv("STALE_CLAIM_MINUTES", str(_STALE_CLAIM_MINUTES)))
 
 
 def _now() -> str:
@@ -142,18 +174,81 @@ def is_eligible(filing: dict) -> bool:
     return False
 
 
-def claim_filing(client, filing_id: int, attempt_count: int) -> None:
+def claim_filing(client, filing_id: int) -> Optional[dict]:
     """
-    Mark a filing as in_progress and increment the attempt counter.
-    Should be called immediately before downloading the PDF.
+    Atomically claim a filing for processing using the claim_filing Postgres RPC.
+
+    Delegates to a single UPDATE…WHERE…RETURNING * statement, which is atomic
+    under PostgreSQL row-level locking.  If two concurrent workers call this for
+    the same filing_id, exactly one receives the row; the other receives nothing.
+
+    Claimable states (evaluated by the DB):
+      · status = 'pending'
+      · status = 'failed' AND next_attempt_after <= now()
+      · status = 'in_progress' AND last_attempted_at < now() - stale_threshold
+        (stale-claim recovery; the reaper normally handles this at startup)
+
+    Returns the claimed row dict with the post-increment attempt_count, or None
+    if the race was lost.  Callers MUST check: None means do not process.
     """
-    client.table("filings").update({
-        "status":           "in_progress",
-        "attempt_count":    attempt_count + 1,
-        "last_attempted_at": _now(),
-        "next_attempt_after": None,
-        "updated_at":       _now(),
-    }).eq("id", filing_id).execute()
+    result = client.rpc("claim_filing", {
+        "p_filing_id":    filing_id,
+        "p_stale_minutes": _stale_minutes(),
+    }).execute()
+    if result.data:
+        claimed = result.data[0]
+        logger.debug(
+            "Claimed filing %d (attempt %d/%d)",
+            filing_id,
+            claimed.get("attempt_count", "?"),
+            claimed.get("max_attempts", "?"),
+        )
+        return claimed
+    logger.debug("Lost claim race for filing %d — another worker claimed it", filing_id)
+    return None
+
+
+def reap_stale_filings(client, stale_minutes: int = None) -> list[dict]:
+    """
+    Recover filings stuck in 'in_progress' longer than stale_minutes.
+
+    A worker crash (OOM, runner timeout, SIGKILL) leaves the row in_progress
+    indefinitely: is_eligible() returns False for in_progress, so the filing
+    would never be retried without this reaper.
+
+    Transition rules (applied by the DB atomically):
+      · attempt_count <  max_attempts → status = 'failed', backoff scheduled
+      · attempt_count >= max_attempts → status = 'skipped', permanent
+
+    Should be called:
+      1. At listener/sweep startup, before processing any filings.
+      2. Before get_retryable_filings() selects failed rows.
+
+    Returns the list of recovered rows (may be empty).
+    """
+    if stale_minutes is None:
+        stale_minutes = _stale_minutes()
+
+    result = client.rpc("reap_stale_filings", {
+        "p_stale_minutes": stale_minutes,
+    }).execute()
+    rows = result.data or []
+
+    if rows:
+        logger.warning(
+            "Reaped %d stale in_progress filing(s) (threshold: %d min)",
+            len(rows), stale_minutes,
+        )
+        for row in rows:
+            logger.warning(
+                "  Reaped #%s → %-8s  attempt %s/%s  %s",
+                row.get("id"),
+                row.get("status"),
+                row.get("attempt_count"),
+                row.get("max_attempts"),
+                str(row.get("pdf_url", ""))[:80],
+            )
+    return rows
 
 
 def complete_filing(
@@ -228,9 +323,11 @@ def skip_filing(client, filing_id: int, *, reason: str) -> None:
 
 def get_retryable_filings(client) -> list[dict]:
     """
-    Return failed filings whose backoff window has elapsed and which are
-    below their max_attempts ceiling.  These should be processed as if new.
+    Reap stale in_progress rows, then return failed filings whose backoff
+    window has elapsed and which are below their max_attempts ceiling.
     """
+    reap_stale_filings(client)
+
     now = _now()
     result = (
         client.table("filings")
@@ -240,7 +337,6 @@ def get_retryable_filings(client) -> list[dict]:
         .execute()
     )
     rows = result.data or []
-    # Filter out rows that have reached their attempt ceiling.
     eligible = [r for r in rows if r.get("attempt_count", 0) < r.get("max_attempts", 3)]
     if eligible:
         logger.info("%d failed filing(s) eligible for retry", len(eligible))

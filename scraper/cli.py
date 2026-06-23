@@ -9,6 +9,11 @@ Commands:
                             --max-age-hours) to pending.  Useful after a scraper
                             bug that caused mass failures.
     list-failed             List all filings in 'failed' or 'skipped' status.
+    reap-stale              Recover filings stuck in_progress by a crashed worker.
+    check-pdf <url-or-id>   Download the PDF and compare its SHA-256 against the
+                            stored value. Reports: unchanged | CHANGED | unavailable.
+                            NOTE: changed-PDF re-processing is not automatic; use
+                            `retry <url-or-id>` if re-parse is needed.
 
 Usage:
     python3 -m scraper.cli inspect https://...pdf
@@ -18,6 +23,10 @@ Usage:
     python3 -m scraper.cli retry-all --max-age-hours 24
     python3 -m scraper.cli list-failed
     python3 -m scraper.cli list-failed --status skipped
+    python3 -m scraper.cli reap-stale
+    python3 -m scraper.cli reap-stale --stale-minutes 60
+    python3 -m scraper.cli check-pdf https://...pdf
+    python3 -m scraper.cli check-pdf 42
 """
 
 import argparse
@@ -132,6 +141,80 @@ def cmd_retry_all(client, args) -> int:
     return 0 if reset == len(rows) else 1
 
 
+def cmd_reap_stale(client, args) -> int:
+    """Recover filings stuck in_progress by a crashed worker."""
+    stale_minutes = args.stale_minutes or filing_ledger._stale_minutes()
+    print(f"Reaping in_progress filings older than {stale_minutes} minutes...")
+    reaped = filing_ledger.reap_stale_filings(client, stale_minutes=stale_minutes)
+    if not reaped:
+        print("Nothing stale found.")
+        return 0
+
+    print(f"\n{'ID':>6}  {'New status':<10}  {'Attempts':>8}  URL")
+    print("─" * 90)
+    for r in reaped:
+        attempts = f"{r.get('attempt_count',0)}/{r.get('max_attempts',3)}"
+        print(f"  {r['id']:>4}  {r['status']:<10}  {attempts:>8}  {str(r.get('pdf_url',''))[:60]}")
+
+    print(f"\n{len(reaped)} filing(s) reaped.")
+    return 0
+
+
+def cmd_check_pdf(client, args) -> int:
+    """
+    Download a filing's PDF and compare its SHA-256 against the stored value.
+
+    Changed-PDF re-processing is NOT automatic. This command is a manual
+    diagnostic only. To re-parse a changed PDF: `retry <url-or-id>`.
+
+    Exit codes:
+      0 — unchanged
+      1 — filing not found or no hash on record
+      2 — CHANGED (stored hash ≠ live hash)
+      3 — unavailable (download failed)
+    """
+    import hashlib
+    import requests as req
+
+    row = filing_ledger.inspect(client, args.target)
+    if not row:
+        print(f"No filing found for: {args.target!r}")
+        return 1
+
+    stored_sha256 = row.get("pdf_sha256")
+    if not stored_sha256:
+        print(
+            f"Filing #{row['id']}: no pdf_sha256 on record.\n"
+            f"  status={row.get('status')}  — filing has not been successfully completed."
+        )
+        return 1
+
+    url = row["pdf_url"]
+    print(f"Checking: {url}")
+    try:
+        resp = req.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        fresh_sha256 = hashlib.sha256(resp.content).hexdigest()
+    except req.Timeout:
+        print(f"unavailable  #{row['id']}  (timeout after 30 s)")
+        return 3
+    except Exception as exc:
+        print(f"unavailable  #{row['id']}  ({exc})")
+        return 3
+
+    if fresh_sha256 == stored_sha256:
+        print(f"unchanged    #{row['id']}  SHA-256: {stored_sha256[:24]}…")
+        return 0
+
+    print(f"CHANGED      #{row['id']}")
+    print(f"  stored:  {stored_sha256}")
+    print(f"  current: {fresh_sha256}")
+    print()
+    print("NOTE: changed-PDF re-processing is NOT automatic.")
+    print(f"  To re-parse: python3 -m scraper.cli retry {args.target!r}")
+    return 2
+
+
 def cmd_list_failed(client, args) -> int:
     status_filter = args.status or ["failed", "skipped"]
     if isinstance(status_filter, str):
@@ -195,6 +278,17 @@ def build_parser() -> argparse.ArgumentParser:
     plf.add_argument("--status", choices=["failed", "skipped"],
                      help="Filter by status (default: both)")
 
+    # reap-stale
+    prs = sub.add_parser("reap-stale",
+                          help="Recover in_progress filings abandoned by a crashed worker")
+    prs.add_argument("--stale-minutes", type=int, metavar="N",
+                     help=f"Override the stale threshold (default: {filing_ledger._STALE_CLAIM_MINUTES} min)")
+
+    # check-pdf
+    pcp = sub.add_parser("check-pdf",
+                          help="Compare a filing's live PDF SHA-256 against the stored value")
+    pcp.add_argument("target", help="PDF URL or filing integer ID")
+
     return p
 
 
@@ -221,6 +315,8 @@ def main() -> None:
         "retry":       cmd_retry,
         "retry-all":   cmd_retry_all,
         "list-failed": cmd_list_failed,
+        "reap-stale":  cmd_reap_stale,
+        "check-pdf":   cmd_check_pdf,
     }
     sys.exit(dispatch[args.command](client, args))
 

@@ -112,6 +112,9 @@ def _warn_legacy_mode() -> None:
 def _run_with_ledger(client, session: requests.Session, stats: dict) -> dict:
     """Process new and retryable filings using the durable DB ledger."""
 
+    # Recover any filings left in_progress by a previous crashed run.
+    filing_ledger.reap_stale_filings(client)
+
     # Step 1: fetch listing page
     try:
         rows = fetch_listing_page(session, letter="", page=1, timeout=_LISTING_TIMEOUT)
@@ -175,13 +178,14 @@ def _run_with_ledger(client, session: requests.Session, stats: dict) -> dict:
 
     # Step 4: process eligible filings
     for row, filing in to_process:
-        is_retry = filing.get("attempt_count", 0) > 0
         try:
             result = _process_filing_with_ledger(row, filing, client, session)
             if result == "new":
                 stats["new"] += 1
             elif result == "retried":
                 stats["retried"] += 1
+            elif result == "skipped":
+                stats["skipped"] += 1
         except Exception as exc:
             logger.error("Failed processing %s: %s", row.pdf_url, exc)
             stats["errors"] += 1
@@ -197,15 +201,22 @@ def _process_filing_with_ledger(
 ) -> str:
     """
     Download, parse, upsert, and complete/fail one filing using the ledger.
-    Returns 'new' for first-time processing, 'retried' for a retry.
+    Returns 'new', 'retried', or 'skipped' (race lost).
     """
-    filing_id    = filing["id"]
-    attempt_count = filing.get("attempt_count", 0)
-    max_attempts  = filing.get("max_attempts", 3)
-    is_retry      = attempt_count > 0
+    filing_id = filing["id"]
+    is_retry  = filing.get("attempt_count", 0) > 0  # capture before claim increments
 
     logger.info("Processing filing %d (%s): %s", filing_id, "retry" if is_retry else "new", row.pdf_url)
-    filing_ledger.claim_filing(client, filing_id, attempt_count)
+
+    # Atomic claim — exactly one concurrent worker will receive the row.
+    claimed = filing_ledger.claim_filing(client, filing_id)
+    if claimed is None:
+        logger.info("Filing %d: lost claim race — skipping", filing_id)
+        return "skipped"
+
+    # Use the DB's post-increment attempt_count for all subsequent calls.
+    attempt_count = claimed["attempt_count"]
+    max_attempts  = claimed.get("max_attempts", 3)
 
     # Download
     try:
@@ -214,7 +225,7 @@ def _process_filing_with_ledger(
         filing_ledger.fail_filing(
             client, filing_id,
             error=str(exc),
-            attempt_count=attempt_count + 1,
+            attempt_count=attempt_count,
             max_attempts=max_attempts,
         )
         raise
@@ -222,7 +233,7 @@ def _process_filing_with_ledger(
         filing_ledger.fail_filing(
             client, filing_id,
             error=str(exc),
-            attempt_count=attempt_count + 1,
+            attempt_count=attempt_count,
             max_attempts=max_attempts,
         )
         raise

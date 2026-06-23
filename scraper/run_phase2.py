@@ -79,7 +79,7 @@ def _crawl_company(
             attempt_count = 0
             max_attempts  = 3
 
-            # ── Ledger: register filing and check if already done ─────────────
+            # ── Ledger: register filing and claim it atomically ───────────────
             if use_ledger:
                 try:
                     filing = filing_ledger.register_filing(
@@ -88,9 +88,8 @@ def _crawl_company(
                         filing_date=row.filing_date,
                         company_name=company_name,
                     )
-                    filing_id     = filing["id"]
-                    attempt_count = filing.get("attempt_count", 0)
-                    max_attempts  = filing.get("max_attempts", 3)
+                    filing_id    = filing["id"]
+                    max_attempts = filing.get("max_attempts", 3)
 
                     if filing["status"] == "completed":
                         stats["filing_skipped"] += 1
@@ -101,8 +100,16 @@ def _crawl_company(
                         stats["filing_skipped"] += 1
                         continue
 
-                    filing_ledger.claim_filing(client, filing_id, attempt_count)
-                    attempt_count += 1
+                    # Atomic claim: returns None if another worker won the race.
+                    claimed = filing_ledger.claim_filing(client, filing_id)
+                    if claimed is None:
+                        logger.debug("Filing %s: claim lost — skipping", row.pdf_url)
+                        stats["filing_skipped"] += 1
+                        continue
+
+                    # Use the DB's post-increment attempt_count for fail/complete calls.
+                    attempt_count = claimed["attempt_count"]
+                    max_attempts  = claimed.get("max_attempts", max_attempts)
 
                 except Exception as exc:
                     logger.warning("Ledger registration failed for %s: %s — processing anyway", row.pdf_url, exc)
@@ -273,6 +280,7 @@ def run_crawl(
     use_ledger = filing_ledger.table_exists(client)
     if use_ledger:
         logger.info("Filing ledger available — filing-level dedup and retry tracking enabled")
+        filing_ledger.reap_stale_filings(client)   # recover crashed workers before crawl
     else:
         allow_legacy = os.getenv("ALLOW_LEGACY_INGESTION", "").lower() in ("1", "true", "yes")
         if not allow_legacy:
