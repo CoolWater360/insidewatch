@@ -160,13 +160,16 @@ END $$;
 -- ─── Section 5: Backfill new columns for existing records ────────────────────
 
 -- 5a. economic_intent — derived from transaction_type.
+--     Only touches rows where economic_intent has never been set (IS NULL).
+--     Does NOT overwrite 'unclear' — a future manual or Phase 5 reclassification
+--     must survive a re-run of this migration without being clobbered.
 UPDATE transactions
 SET economic_intent = CASE
-    WHEN transaction_type IN ('buy', 'sell')                          THEN 'discretionary'
+    WHEN transaction_type IN ('buy', 'sell')                               THEN 'discretionary'
     WHEN transaction_type IN ('grant', 'option_exercise', 'sell_to_cover') THEN 'mechanical'
     ELSE 'unclear'
 END
-WHERE economic_intent IS NULL OR economic_intent = 'unclear';
+WHERE economic_intent IS NULL;
 
 -- 5b. review_status — derived from needs_review flag.
 UPDATE transactions
