@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS filings (
 
 DO $$ BEGIN
     ALTER TABLE filings ADD CONSTRAINT filings_pdf_url_unique UNIQUE (pdf_url);
-EXCEPTION WHEN duplicate_table THEN
+EXCEPTION WHEN duplicate_object THEN
     RAISE NOTICE 'filings_pdf_url_unique already exists — skipping.';
 END $$;
 

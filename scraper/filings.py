@@ -87,17 +87,33 @@ def register_filing(
     if existing.data:
         return existing.data[0]
 
-    result = client.table("filings").insert({
-        "pdf_url":       pdf_url,
-        "filing_date":   filing_date,
-        "company_name":  company_name,
-        "status":        "pending",
-        "scraper_version": SCRAPER_VERSION,
-        "first_seen_at": _now(),
-        "updated_at":    _now(),
-    }).execute()
-    logger.debug("Registered new filing: %s", pdf_url)
-    return result.data[0]
+    try:
+        result = client.table("filings").insert({
+            "pdf_url":         pdf_url,
+            "filing_date":     filing_date,
+            "company_name":    company_name,
+            "status":          "pending",
+            "scraper_version": SCRAPER_VERSION,
+            "first_seen_at":   _now(),
+            "updated_at":      _now(),
+        }).execute()
+        logger.debug("Registered new filing: %s", pdf_url)
+        return result.data[0]
+    except Exception as exc:
+        # Concurrent INSERT race on pdf_url unique constraint: another worker
+        # inserted this URL between our SELECT and our INSERT.  Re-query to
+        # return their row rather than propagating a constraint error.
+        exc_str = str(exc).lower()
+        if "unique" in exc_str or "duplicate" in exc_str or "23505" in exc_str:
+            logger.debug(
+                "register_filing: concurrent INSERT race for %s — re-querying", pdf_url
+            )
+            retry = (
+                client.table("filings").select("*").eq("pdf_url", pdf_url).execute()
+            )
+            if retry.data:
+                return retry.data[0]
+        raise
 
 
 def is_eligible(filing: dict) -> bool:

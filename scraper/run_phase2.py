@@ -274,9 +274,24 @@ def run_crawl(
     if use_ledger:
         logger.info("Filing ledger available — filing-level dedup and retry tracking enabled")
     else:
+        allow_legacy = os.getenv("ALLOW_LEGACY_INGESTION", "").lower() in ("1", "true", "yes")
+        if not allow_legacy:
+            logger.critical(
+                "FATAL: filings table not found in Supabase. "
+                "Refusing to run the sweep without the durable retry ledger. "
+                "Apply db/migrations/002_filings_table.sql and re-run. "
+                "For local development or emergency use only, set ALLOW_LEGACY_INGESTION=true "
+                "— but note that legacy mode DOES NOT provide retry-safe ingestion or "
+                "source_filing_id population."
+            )
+            sys.exit(1)
         logger.warning(
-            "filings table not found — running without filing ledger. "
-            "Apply db/migrations/002_filings_table.sql to enable."
+            "=" * 72 + "\n"
+            "LEGACY SWEEP MODE ACTIVE  (ALLOW_LEGACY_INGESTION=true)\n"
+            "filings table absent — running without ledger. source_filing_id will\n"
+            "NOT be populated. Failed PDFs have no retry mechanism.\n"
+            "Apply db/migrations/002_filings_table.sql as soon as possible.\n"
+            + "=" * 72
         )
 
     logger.info("Connected to Supabase (max_tier=%d, workers=%d)", max_tier, max_workers)

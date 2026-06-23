@@ -6,10 +6,14 @@ Design goals:
   · Strict 6 s timeout on the listing fetch; 10 s on each PDF download.
   · Durable filing ledger (Phase 2): each PDF is registered in the filings
     table with full status tracking and exponential-backoff retry.
-  · File-cache fallback: if the filings table does not yet exist (migration
-    002 not applied), behaviour degrades gracefully to the pre-Phase-2 file
-    cache so production scraping is never interrupted by a missing migration.
-  · No concurrent threads — processes new PDFs sequentially to stay polite.
+  · Production safety: if the filings table is unavailable and
+    ALLOW_LEGACY_INGESTION is not set, the listener exits with an error
+    rather than silently degrading.  This prevents data loss from the
+    legacy finally-block cache write, which marks a URL as seen even when
+    processing fails, making the failure permanently unrecoverable.
+  · Legacy fallback: only permitted when ALLOW_LEGACY_INGESTION=true.
+    This environment variable is intended exclusively for local development
+    or short-term emergency use.  It MUST NOT be set in production or CI.
 
 Typical run:
   0 new filings → ~1–2 s   (listing fetch only)
@@ -17,6 +21,7 @@ Typical run:
 """
 
 import logging
+import os
 from typing import Optional
 
 import requests
@@ -41,8 +46,12 @@ def run_listener() -> dict:
     """
     Fetch the most recent listings, process new filings, and return stats.
 
-    Routes to the durable ledger path if the filings table exists, otherwise
-    falls back to the legacy file cache.
+    Routes to the durable ledger path if the filings table exists.
+    If the table is absent:
+      · Without ALLOW_LEGACY_INGESTION: returns immediately with errors=1
+        so the calling process exits non-zero (CI job fails visibly).
+      · With ALLOW_LEGACY_INGESTION=true: runs the legacy file-cache path
+        with prominent warnings.  For local dev / emergency only.
 
     Returns: {"new": int, "skipped": int, "errors": int, "retried": int}
     """
@@ -59,11 +68,43 @@ def run_listener() -> dict:
     if filing_ledger.table_exists(client):
         return _run_with_ledger(client, session, stats)
 
-    logger.warning(
-        "filings table not found — running in legacy cache mode. "
-        "Apply db/migrations/002_filings_table.sql to enable the durable retry ledger."
-    )
+    # ── Filings table not available ───────────────────────────────────────────
+    allow_legacy = os.getenv("ALLOW_LEGACY_INGESTION", "").lower() in ("1", "true", "yes")
+
+    if not allow_legacy:
+        logger.critical(
+            "FATAL: filings table not found in Supabase. "
+            "Refusing to run the listener without the durable retry ledger. "
+            "Apply db/migrations/002_filings_table.sql and re-run. "
+            "For local development or emergency use only, set ALLOW_LEGACY_INGESTION=true "
+            "— but note that legacy mode DOES NOT provide retry-safe ingestion."
+        )
+        stats["errors"] = 1
+        return stats
+
+    _warn_legacy_mode()
     return _run_with_cache(client, session, stats)
+
+
+def _warn_legacy_mode() -> None:
+    """Emit a multi-line WARNING that is impossible to miss in any log viewer."""
+    for line in [
+        "=" * 72,
+        "LEGACY INGESTION MODE ACTIVE  (ALLOW_LEGACY_INGESTION=true)",
+        "=" * 72,
+        "The filings table is not present. Running on the pre-Phase-2 file",
+        "cache. This mode has a known data-loss issue: the finally block in",
+        "_run_with_cache marks a URL as seen even when processing fails,",
+        "making the failure permanently unrecoverable without manual cache",
+        "deletion. This mode also does NOT populate source_filing_id on any",
+        "transaction and does NOT provide exponential-backoff retry.",
+        "",
+        "MUST NOT be used for institutional data collection.",
+        "Apply db/migrations/002_filings_table.sql as soon as possible,",
+        "then unset ALLOW_LEGACY_INGESTION.",
+        "=" * 72,
+    ]:
+        logger.warning(line)
 
 
 # ── Ledger path (Phase 2) ─────────────────────────────────────────────────────
