@@ -47,10 +47,16 @@ class ParsedTransaction:
     raw_hash: str       # SHA-256 for deduplication (redesigned in Phase 4)
 
     # ── Transaction classification ────────────────────────────────────────────
-    # Current values: buy | sell | grant | option_exercise | sell_to_cover | other
+    # Extended taxonomy (Phase 7): buy | sell | grant | option_exercise |
+    # sell_to_cover | subscription | conversion | inheritance |
+    # gift_in | gift_out | transfer_in | transfer_out | other
     transaction_type: str = "buy"
     # discretionary = active choice; mechanical = automatic/contractual; unclear = unknown
     economic_intent: str = "unclear"
+    # Rule that produced this classification: "<rule_name>: <detail>"
+    classification_rationale: Optional[str] = None
+    # Raw section-4b text (Natura dell'operazione) from the PDF — preserved verbatim
+    raw_nature_text: Optional[str] = None
 
     # ── Insider verification (Phase 4) ────────────────────────────────────────
     # False when the name contains a legal-entity marker (S.p.A., Ltd, etc.)

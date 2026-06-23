@@ -340,6 +340,8 @@ def upsert_transaction(
     role_category: str = "other",
     transaction_type: str = "buy",
     economic_intent: str = "unclear",
+    classification_rationale: Optional[str] = None,
+    raw_nature_text: Optional[str] = None,
     # ── Quality flags ─────────────────────────────────────────────────────────
     needs_review: bool = False,
     extraction_confidence: Optional[float] = None,
@@ -493,6 +495,10 @@ def upsert_transaction(
             payload["raw_document_sha256"] = raw_document_sha256
         if source_filing_id is not None:
             payload["source_filing_id"] = source_filing_id
+        if classification_rationale is not None:
+            payload["classification_rationale"] = classification_rationale
+        if raw_nature_text is not None:
+            payload["raw_nature_text"] = raw_nature_text
 
         tx = client.table("transactions").insert(payload).execute()
         tx_id = tx.data[0]["id"]

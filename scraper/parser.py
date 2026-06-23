@@ -29,6 +29,7 @@ from typing import Optional
 
 import pdfplumber
 
+from .classifier import classify
 from .insiders import assess_insider, normalize_name
 from .models import ParsedTransaction
 
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Increment this when the parser logic changes in a way that may produce
 # different output from the same PDF.  Format: '<major>.<minor>.<patch>'
 # Legacy records (pre-Phase 1) are labelled '0.0.0' via migration 001.
-PARSER_VERSION = "1.1.0"
+PARSER_VERSION = "1.2.0"
 
 # ─── Direction + transaction-type lookup ─────────────────────────────────────
 # Maps keyword → (direction, transaction_type).
@@ -46,19 +47,19 @@ PARSER_VERSION = "1.1.0"
 _DIRECTION_MAP: dict[str, tuple[str, str]] = {
     "ACQUISTO":       ("buy",  "buy"),
     "PURCHASE":       ("buy",  "buy"),
-    "SOTTOSCRIZIONE": ("buy",  "buy"),            # subscription (new shares)
-    "ASSEGNAZIONE":   ("buy",  "grant"),          # free share assignment
-    "ATTRIBUZIONE":   ("buy",  "grant"),          # free share attribution
+    "SOTTOSCRIZIONE": ("buy",  "subscription"),    # rights issue / capital increase
+    "ASSEGNAZIONE":   ("buy",  "grant"),
+    "ATTRIBUZIONE":   ("buy",  "grant"),
     "ASSIGNMENT":     ("buy",  "grant"),
-    "ESERCIZIO":      ("buy",  "option_exercise"),# option / warrant exercise
+    "ESERCIZIO":      ("buy",  "option_exercise"),
     "EXERCISE":       ("buy",  "option_exercise"),
     "CESSIONE":       ("sell", "sell"),
     "VENDITA":        ("sell", "sell"),
     "SALE":           ("sell", "sell"),
-    "TRASFERIMENTO":  ("sell", "sell"),           # transfer
-    "DONAZIONE":      ("sell", "sell"),           # donation
-    "PERMUTA":        ("sell", "sell"),           # exchange
-    "SUCCESSIONE":    ("buy",  "other"),          # inheritance
+    "TRASFERIMENTO":  ("sell", "transfer_out"),    # classifier refines to transfer_in if buy
+    "DONAZIONE":      ("sell", "gift_out"),        # classifier refines to gift_in if buy
+    "PERMUTA":        ("sell", "conversion"),      # instrument exchange
+    "SUCCESSIONE":    ("buy",  "inheritance"),
 }
 
 
@@ -676,8 +677,21 @@ def parse_text(
             else:
                 total_value = quantity * unit_price
 
-            if unit_price == 0 and total_value == 0 and quantity > 0:
-                transaction_type = "grant"
+            raw_nature_text = _extract_section_4b(block) or ""
+
+            # Classifier produces final transaction_type, economic_intent, rationale.
+            # The zero-price-to-grant reclassification is now inside the classifier.
+            clf = classify(
+                direction=direction,
+                raw_nature_text=raw_nature_text,
+                unit_price=unit_price,
+                quantity=quantity,
+                parser_type_hint=transaction_type,
+                parse_warnings=all_warnings,
+            )
+            transaction_type = clf.transaction_type
+            economic_intent = clf.economic_intent
+            classification_rationale = clf.rationale
 
             si_yes_fallback = any("SI/YES flag" in w for w in dir_warns)
             needs_review = (
@@ -686,7 +700,6 @@ def parse_text(
                 or name_truncated
             )
 
-            economic_intent = _compute_economic_intent(transaction_type)
             extraction_conf = _compute_extraction_confidence(
                 insider_name, company, tx_date, quantity, unit_price,
                 transaction_type, all_warnings, isin=isin,
@@ -727,6 +740,8 @@ def parse_text(
                 role_category=assessment["role_category"],
                 transaction_type=transaction_type,
                 economic_intent=economic_intent,
+                classification_rationale=classification_rationale,
+                raw_nature_text=raw_nature_text or None,
                 needs_review=needs_review,
                 extraction_confidence=extraction_conf,
                 classification_confidence=classification_conf,
