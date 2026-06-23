@@ -23,13 +23,21 @@ export async function GET(
 
   const { data, error } = await db
     .from("transactions")
-    .select("*, companies(id, name, ticker, sector), insiders(full_name, role)")
+    .select(
+      "id, transaction_date, filed_date, company_id, insider_id, " +
+      "direction, transaction_type, economic_intent, " +
+      "instrument_type, isin, " +
+      "quantity, unit_price, total_value, currency, " +
+      "review_status, source_url, " +
+      "extraction_confidence, classification_confidence, " +
+      "companies(id, name, ticker, sector), insiders(full_name, role)"
+    )
     .eq("id", txId)
     .single();
 
   if (error || !data) return apiError("Transaction not found.", 404);
 
-  return apiJson([data as Record<string, unknown>], {
+  return apiJson([(data as unknown) as Record<string, unknown>], {
     page: 1,
     page_size: 1,
     total: 1,

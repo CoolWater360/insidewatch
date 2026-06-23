@@ -26,7 +26,7 @@ export async function GET(
     .select(
       "id, pdf_url, filing_date, company_name, status, attempt_count, " +
       "max_attempts, last_attempted_at, next_attempt_after, " +
-      "pdf_sha256, error_message, first_seen_at, completed_at, " +
+      "pdf_sha256, last_error, first_seen_at, completed_at, " +
       "source_published_utc, discovered_utc, downloaded_utc, " +
       "parsed_utc, validated_utc, delivered_utc"
     )

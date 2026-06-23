@@ -22,8 +22,21 @@ import { apiError, apiJson, apiCsv, parsePagination } from "@/lib/api-response";
 
 const SORTABLE = new Set(["transaction_date", "filed_date", "total_value", "quantity"]);
 
+// Explicit allowlist — excludes internal-only fields:
+//   raw_hash, raw_document_sha256, identity_hash (forensic dedup keys)
+//   review_notes (operator annotations, internal only)
+//   raw_nature_text (verbatim PDF extract, voluminous and internal)
+//   classification_rationale, classification_override, classification_overridden_by/at
+//   needs_review, source_transaction_index, source_filing_id, parser_version
+//   is_current, version_number, superseded_by/at (versioning internals)
 const SELECT =
-  "*, companies(id, name, ticker, sector), insiders(full_name, role)";
+  "id, transaction_date, filed_date, company_id, insider_id, " +
+  "direction, transaction_type, economic_intent, " +
+  "instrument_type, isin, " +
+  "quantity, unit_price, total_value, currency, " +
+  "review_status, source_url, " +
+  "extraction_confidence, classification_confidence, " +
+  "companies(id, name, ticker, sector), insiders(full_name, role)";
 
 export async function GET(request: NextRequest) {
   const db = getSupabaseServer();
@@ -67,7 +80,7 @@ export async function GET(request: NextRequest) {
   if (error) return apiError("Failed to fetch transactions.", 500);
 
   const total = count ?? 0;
-  const rows = (data ?? []) as Record<string, unknown>[];
+  const rows = (data ?? []) as unknown as Record<string, unknown>[];
 
   if (format === "csv") {
     const flat = rows.map((r) => {
