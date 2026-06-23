@@ -1,0 +1,13 @@
+canonical_name,short_name,isin,lei,ticker,market,sector,country,aliases
+Eni S.p.A.,Eni,IT0003132476,529900YNPOSPJ0XQ6V44,ENI,MTA,Energy,IT,"ENI SPA|Eni SpA"
+Enel S.p.A.,Enel,IT0003128367,8156008E9A5B30847624,ENEL,MTA,Utilities,IT,"ENEL SPA|Enel SpA"
+Intesa Sanpaolo S.p.A.,Intesa Sanpaolo,IT0000072618,2W8N8UU78PMDQKZENC08,ISP,MTA,Financials,IT,"Intesa Sanpaolo SpA|INTESA SANPAOLO SPA"
+UniCredit S.p.A.,UniCredit,IT0005239360,549300TRUWO2CD2G5692,UCG,MTA,Financials,IT,"Unicredit SpA|UNICREDIT SPA"
+Ferrari N.V.,Ferrari,NL0011585146,549300RI9L7WTQSRCZ21,RACE,MTA,Consumer Discretionary,NL,"Ferrari NV"
+Stellantis N.V.,Stellantis,NL00150001Q9,635400LZLYD5TBNQ6P22,STLAM,MTA,Consumer Discretionary,NL,"Stellantis NV|STELLANTIS N.V."
+Leonardo S.p.A.,Leonardo,IT0003856405,8156009CCEEF0HWLE826,LDO,MTA,Industrials,IT,"Leonardo SpA|LEONARDO SPA|Finmeccanica S.p.A."
+Mediobanca S.p.A.,Mediobanca,IT0000062957,81560067F5FDXE5TI573,MB,MTA,Financials,IT,"Mediobanca SpA|MEDIOBANCA SPA"
+Pirelli & C. S.p.A.,Pirelli,IT0005278236,815600D31D4CB7FDCD32,PIRC,MTA,Consumer Discretionary,IT,"Pirelli SpA|PIRELLI & C SPA|Pirelli & C. S.p.A."
+Buzzi S.p.A.,Buzzi,IT0001347308,,BZU,MTA,Materials,IT,"Buzzi Unicem S.p.A.|Buzzi Unicem SpA|BUZZI UNICEM SPA"
+Emak S.p.A.,Emak,IT0001237053,,EMAK,AIM Italy,Industrials,IT,"EMAK SPA|Emak SpA"
+Technip Energies N.V.,Technip Energies,FR0014007L35,,TE,MTA,Energy,NL,"Technip Energies NV|TECHNIP ENERGIES N.V."

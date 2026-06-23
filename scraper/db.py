@@ -53,14 +53,48 @@ def get_supabase_client() -> Client:
     return client
 
 
-def _resolve_company(client: Client, company_name: str, isin: Optional[str]) -> int:
+def _resolve_company(
+    client: Client,
+    company_name: str,
+    isin: Optional[str],
+    filing_id: Optional[int] = None,
+) -> int:
     """
     Find or create a company row, returning its id.
 
-    Lookup order:
+    Phase 6: tries the issuer master first (ISIN → securities, then alias
+    table exact lookup).  On a hit the companies row is linked to the issuer.
+    On a miss the raw name is queued in unmatched_issuers for operator review.
+    Either way the function falls through to the original find-or-create logic
+    so ingestion is never blocked by a missing issuer master entry.
+
+    Find-or-create order (legacy path, always runs):
       1. By name (case-insensitive) — the common path.
       2. By ISIN — catches renames and duplicate seeds.
       3. Insert — with graceful fallback if a unique constraint fires mid-race.
+    """
+    from .issuer_resolver import resolve_issuer, link_company_to_issuer
+
+    # ── Phase 6: issuer master lookup ─────────────────────────────────────────
+    issuer_result = resolve_issuer(client, company_name, isin, filing_id=filing_id)
+
+    # ── Legacy: find or create companies row (unchanged) ──────────────────────
+    company_id = _find_or_create_company(client, company_name, isin)
+
+    # ── Link companies row to issuer master if resolved ───────────────────────
+    if issuer_result.issuer_id:
+        link_company_to_issuer(client, company_id, issuer_result.issuer_id)
+
+    return company_id
+
+
+def _find_or_create_company(
+    client: Client,
+    company_name: str,
+    isin: Optional[str],
+) -> int:
+    """
+    Find or create a companies row by name / ISIN.
 
     Never raises on ISIN constraint violations; logs and continues instead.
     """
@@ -73,7 +107,6 @@ def _resolve_company(client: Client, company_name: str, isin: Optional[str]) -> 
             try:
                 client.table("companies").update({"isin": isin}).eq("id", company_id).execute()
             except Exception as exc:
-                # ISIN already claimed by another row — not fatal, just skip backfill
                 logger.warning(
                     "ISIN backfill skipped for %r (ISIN %s conflicts): %s",
                     company_name, isin, exc,
@@ -101,7 +134,6 @@ def _resolve_company(client: Client, company_name: str, isin: Optional[str]) -> 
     except Exception as insert_exc:
         logger.warning("Company insert failed for %r: %s — attempting recovery", company_name, insert_exc)
 
-        # Recovery: retry lookups in case a concurrent worker just inserted it
         if isin:
             by_isin2 = client.table("companies").select("id").eq("isin", isin).execute()
             if by_isin2.data:
@@ -111,7 +143,6 @@ def _resolve_company(client: Client, company_name: str, isin: Optional[str]) -> 
         if by_name2.data:
             return by_name2.data[0]["id"]
 
-        # Last resort: insert without ISIN to avoid the unique constraint
         try:
             comp2 = client.table("companies").insert({"name": company_name}).execute()
             return comp2.data[0]["id"]
@@ -422,7 +453,7 @@ def upsert_transaction(
             }
 
         # ── New transaction ───────────────────────────────────────────────────
-        company_id = _resolve_company(client, company_name, isin)
+        company_id = _resolve_company(client, company_name, isin, filing_id=source_filing_id)
         insider_id = _resolve_insider(
             client, insider_name, insider_role, company_id, insider_verified, role_category
         )
