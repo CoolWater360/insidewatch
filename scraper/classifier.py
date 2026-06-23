@@ -33,9 +33,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ClassificationResult:
-    transaction_type: str   # one of the 13 taxonomy values
+    transaction_type: str   # one of the 15 taxonomy values
     economic_intent: str    # discretionary | mechanical | unclear
     rationale: str          # "<rule>: <detail>" — stored in DB
+    needs_review: bool = False  # True when classification is uncertain or ambiguous
 
 
 # ─── Economic intent mapping ─────────────────────────────────────────────────
@@ -43,11 +44,17 @@ class ClassificationResult:
 # Transactions where the insider exercised active discretion.
 _DISCRETIONARY = {"buy", "sell", "subscription"}
 
+# Cannot be determined — source wording/type is absent or unreadable.
+# Always emits economic_intent=unclear and needs_review=True.
+_UNKNOWN = {"unknown"}
+
 # Transactions driven by contract, plan, or external event — not active choice.
 _MECHANICAL = {
     "grant", "option_exercise", "sell_to_cover",
     "conversion", "inheritance", "gift_in", "gift_out",
     "transfer_in", "transfer_out",
+    "pledge_or_security",     # collateral / encumbrance — not a market transaction
+    "derivative_transaction", # derivative instrument over issuer shares
 }
 
 
@@ -56,7 +63,7 @@ def _economic_intent(transaction_type: str) -> str:
         return "discretionary"
     if transaction_type in _MECHANICAL:
         return "mechanical"
-    return "unclear"
+    return "unclear"  # covers both 'other' and 'unknown'
 
 
 # ─── Keyword helpers ──────────────────────────────────────────────────────────
@@ -101,6 +108,7 @@ def classify(
     _ZERO_PRICE_EXPECTED = {
         "inheritance", "gift_in", "gift_out",
         "transfer_in", "transfer_out", "conversion",
+        "pledge_or_security", "derivative_transaction",
     }
     _NON_GRANT_NATURE_KEYWORDS = (
         "SUCCESSIONE", "EREDIT", "INHERITANCE", "HEREDIT",
@@ -127,6 +135,7 @@ def classify(
         "grant", "option_exercise", "sell_to_cover",
         "subscription", "conversion", "inheritance",
         "gift_in", "gift_out", "transfer_in", "transfer_out",
+        "pledge_or_security", "derivative_transaction",
     ):
         # Special refinement: TRASFERIMENTO keyword defaults to transfer_out
         # but direction=='buy' means it's actually an inbound transfer.
@@ -142,7 +151,7 @@ def classify(
     # the raw nature text contains a more specific keyword.
 
     if _contains(nature, "SUCCESSIONE", "EREDIT", "INHERITANCE", "HEREDIT"):
-        return _result("inheritance", f"raw_nature_keyword: inheritance signal in section-4b")
+        return _result("inheritance", "raw_nature_keyword: inheritance signal in section-4b")
 
     if _contains(nature, "SOTTOSCRIZIONE", "SUBSCRIPTION", "RIGHTS ISSUE", "AUMENTO"):
         return _result("subscription", "raw_nature_keyword: subscription/rights issue signal")
@@ -161,6 +170,15 @@ def classify(
         tx_type = "transfer_in" if direction == "buy" else "transfer_out"
         return _result(tx_type, f"raw_nature_keyword: transfer + direction={direction}")
 
+    # Pledge / collateral — not a market transaction; signals encumbrance of shares.
+    # Keywords: PEGNO (pledge), GARANZIA (guarantee/collateral), VINCOLO (encumbrance)
+    if _contains(nature, "PEGNO", "GARANZIA", "VINCOLO", "PLEDGE", "COLLATERAL", "SECURITY INTEREST"):
+        return _result("pledge_or_security", "raw_nature_keyword: pledge/collateral signal")
+
+    # Derivative transaction — instrument is a derivative over the issuer's shares.
+    if _contains(nature, "DERIVAT", "FUTURES", "FORWARD", "CONTRATTO DERIVATO", "DERIVATIVE"):
+        return _result("derivative_transaction", "raw_nature_keyword: derivative instrument signal")
+
     if _contains(nature, "ASSEGNAZIONE", "ATTRIBUZIONE", "GRATUITO", "AWARD", "ATTRIBUTION"):
         if _contains(nature, "VENDITA", "SELL", "COPERTURA", "COVER"):
             return _result("sell_to_cover", "raw_nature_keyword: grant+sell → sell_to_cover")
@@ -169,24 +187,60 @@ def classify(
     if _contains(nature, "ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT"):
         return _result("option_exercise", "raw_nature_keyword: option exercise signal")
 
+    # Sell-to-cover can appear without an explicit grant keyword when the nature
+    # text only says the sale is for coverage/tax purposes.
+    if direction == "sell" and _contains(nature, "COPERTURA", "COVER", "FISCALE"):
+        return _result("sell_to_cover", "raw_nature_keyword: standalone cover/copertura sell")
+
     # ── Rule 4: Direction fallthrough ─────────────────────────────────────────
+    # Direction was extracted from a keyword (ACQUISTO/CESSIONE etc.) but no
+    # specific extended-type keyword was present in the nature text.
+    # Guard: if parse_warnings indicate weak/inferred direction, downgrade to
+    # other/unclear rather than asserting confident discretionary intent.
+    _WEAK_DIRECTION_SIGNALS = (
+        "SI/YES flag",          # direction inferred from option programme, not keyword
+        "fallback",             # any parser fallback path
+    )
+    _direction_is_weak = any(
+        any(sig in w for sig in _WEAK_DIRECTION_SIGNALS)
+        for w in parse_warnings
+    )
+
     if direction == "buy":
+        if _direction_is_weak:
+            return _result(
+                "unknown",
+                "vague_direction: buy inferred from weak signal only",
+                needs_review=True,
+            )
         return _result("buy", "direction_fallthrough: buy")
+
     if direction == "sell":
+        if _direction_is_weak:
+            return _result(
+                "unknown",
+                "vague_direction: sell inferred from weak signal only",
+                needs_review=True,
+            )
         return _result("sell", "direction_fallthrough: sell")
 
-    # ── Rule 5: Unclassifiable ────────────────────────────────────────────────
+    # ── Rule 5: Source wording/type cannot be determined ─────────────────────
+    # 'unknown' is distinct from 'other': the event itself is unreadable,
+    # not merely outside the principal taxonomy.
     return _result(
-        "other",
-        f"unclassified: direction={direction}, hint={parser_type_hint}",
+        "unknown",
+        f"undetermined: direction={direction}, hint={parser_type_hint}",
+        needs_review=True,
     )
 
 
-def _result(tx_type: str, rationale: str) -> ClassificationResult:
+def _result(tx_type: str, rationale: str, *, needs_review: bool = False) -> ClassificationResult:
+    uncertain = tx_type in ("other", "unknown")
     return ClassificationResult(
         transaction_type=tx_type,
         economic_intent=_economic_intent(tx_type),
         rationale=rationale,
+        needs_review=needs_review or uncertain,
     )
 
 

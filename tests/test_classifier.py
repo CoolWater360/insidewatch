@@ -36,6 +36,27 @@ class TestEconomicIntent:
         for t in ("other", "unknown", ""):
             assert _economic_intent(t) == "unclear", t
 
+    def test_unknown_is_distinct_from_other(self):
+        # 'unknown' = source wording cannot be determined (classifier output for unreadable events).
+        # 'other'   = understood but outside principal taxonomy (set via classify_override only).
+        # Both must be persisted as distinct values in the DB and both map to economic_intent=unclear.
+        assert _economic_intent("unknown") == "unclear"
+        assert _economic_intent("other") == "unclear"
+        # Classifier emits 'unknown' for direction=unknown with no recognisable keywords.
+        r = classify("unknown", "", 5.0, 100.0, "other", [])
+        assert r.transaction_type == "unknown", (
+            f"Expected 'unknown', got '{r.transaction_type}' — "
+            "classifier must not collapse undetermined events into 'other'"
+        )
+        assert r.economic_intent == "unclear"
+        assert r.needs_review is True
+        # Classifier never autonomously emits 'other'; that value is reserved for operator overrides.
+        for direction in ("buy", "sell", "unknown"):
+            r2 = classify(direction, "", 1.0, 1.0, "other", [])
+            assert r2.transaction_type != "other", (
+                f"Classifier should not emit 'other' autonomously (direction={direction})"
+            )
+
 
 # ─── Rule 1: zero-price grant ─────────────────────────────────────────────────
 
@@ -184,9 +205,9 @@ class TestFallthrough:
         assert r.transaction_type == "sell"
         assert r.economic_intent == "discretionary"
 
-    def test_unknown_direction_becomes_other(self):
+    def test_unknown_direction_becomes_unknown(self):
         r = classify("unknown", "", 10.0, 100.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.economic_intent == "unclear"
 
     def test_rationale_always_present(self):
@@ -374,13 +395,13 @@ class TestRoadmapCanonicalTypes:
     # ── other / unknown ───────────────────────────────────────────────────────
     def test_unclassifiable_is_unclear_with_review(self):
         r = classify("unknown", "", 10.0, 100.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.economic_intent == "unclear"
         assert r.needs_review is True
 
-    def test_other_type_always_needs_review(self):
+    def test_unknown_type_always_needs_review(self):
         r = classify("unknown", "ALTRO NON SPECIFICATO", 5.0, 50.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.needs_review is True
 
 
@@ -394,16 +415,16 @@ class TestAmbiguousAndVagueSource:
     """
 
     def test_unknown_direction_no_nature_text_is_unclear(self):
-        # No direction keyword found, no nature text → unclassifiable
+        # No direction keyword found, no nature text → undetermined → unknown
         r = classify("unknown", "", 10.0, 100.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.economic_intent == "unclear"
         assert r.needs_review is True
 
     def test_unknown_direction_with_nature_text_is_unclear(self):
-        # "Altro/Other" with unrecognised description → unclassifiable
+        # Unrecognised description → undetermined → unknown
         r = classify("unknown", "OPERAZIONE NON SPECIFICATA", 10.0, 100.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.needs_review is True
 
     def test_si_yes_fallback_warning_prevents_discretionary(self):
@@ -419,8 +440,8 @@ class TestAmbiguousAndVagueSource:
     def test_fallback_warning_in_parse_warnings_prevents_confident_buy(self):
         # "fallback" in parse_warnings signals weak extraction → vague direction
         r = classify("buy", "", 5.0, 100.0, "buy", ["Transaction date found via fallback ISO pattern"])
-        # With "fallback" in warnings, Rule 4 guard fires → other/unclear/needs_review
-        assert r.transaction_type == "other"
+        # With "fallback" in warnings, Rule 4 guard fires → unknown/unclear/needs_review
+        assert r.transaction_type == "unknown"
         assert r.economic_intent == "unclear"
         assert r.needs_review is True
 
@@ -439,13 +460,13 @@ class TestAmbiguousAndVagueSource:
 
     def test_empty_nature_text_with_unknown_direction_is_unclassifiable(self):
         r = classify("unknown", "", 0.0, 0.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.needs_review is True
 
-    def test_zero_price_zero_qty_unknown_direction_is_other(self):
+    def test_zero_price_zero_qty_unknown_direction_is_unknown(self):
         # Both price and qty are zero — extraction failure, not a grant
         r = classify("unknown", "", 0.0, 0.0, "other", [])
-        assert r.transaction_type == "other"
+        assert r.transaction_type == "unknown"
         assert r.needs_review is True
 
 

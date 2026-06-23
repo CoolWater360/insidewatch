@@ -58,7 +58,8 @@ END $$;
 --   transfer_in   — inbound portfolio/custody account transfer    (was 'other')
 --   transfer_out  — outbound portfolio/custody account transfer   (was 'sell')
 --
--- 'other' is retained for events that cannot be mapped to any named class.
+-- 'other' is retained for events that are understood but outside the principal taxonomy.
+-- 'unknown' is distinct: source wording/type cannot be determined at all.
 
 DO $$ BEGIN
     ALTER TABLE transactions ADD CONSTRAINT transactions_transaction_type_check
@@ -66,7 +67,8 @@ DO $$ BEGIN
             'buy', 'sell', 'grant', 'option_exercise', 'sell_to_cover',
             'subscription', 'conversion', 'inheritance',
             'gift_in', 'gift_out', 'transfer_in', 'transfer_out',
-            'other'
+            'pledge_or_security', 'derivative_transaction',
+            'other', 'unknown'
         ));
 EXCEPTION WHEN duplicate_object THEN
     RAISE NOTICE 'transactions_transaction_type_check already exists — skipping add.';
