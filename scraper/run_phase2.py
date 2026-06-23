@@ -107,9 +107,10 @@ def _crawl_company(
                         stats["filing_skipped"] += 1
                         continue
 
-                    # Use the DB's post-increment attempt_count for fail/complete calls.
+                    # Use the DB's post-increment values and lease token.
                     attempt_count = claimed["attempt_count"]
                     max_attempts  = claimed.get("max_attempts", max_attempts)
+                    claim_token   = claimed["claim_token"]
 
                 except Exception as exc:
                     logger.warning("Ledger registration failed for %s: %s — processing anyway", row.pdf_url, exc)
@@ -126,6 +127,7 @@ def _crawl_company(
                         error=f"blocked: {exc}",
                         attempt_count=attempt_count,
                         max_attempts=max_attempts,
+                        claim_token=claim_token,
                     )
                 stats["errors"] += 1
                 continue
@@ -137,6 +139,7 @@ def _crawl_company(
                         error="timeout downloading PDF",
                         attempt_count=attempt_count,
                         max_attempts=max_attempts,
+                        claim_token=claim_token,
                     )
                 stats["errors"] += 1
                 continue
@@ -148,6 +151,7 @@ def _crawl_company(
                         error=str(exc),
                         attempt_count=attempt_count,
                         max_attempts=max_attempts,
+                        claim_token=claim_token,
                     )
                 stats["errors"] += 1
                 continue
@@ -157,7 +161,9 @@ def _crawl_company(
             if not transactions:
                 if use_ledger and filing_id:
                     filing_ledger.skip_filing(
-                        client, filing_id, reason="no transactions parsed from PDF"
+                        client, filing_id,
+                        reason="no transactions parsed from PDF",
+                        claim_token=claim_token,
                     )
                 continue
 
@@ -235,6 +241,7 @@ def _crawl_company(
                     tx_inserted=tx_inserted,
                     tx_dedup=tx_dedup,
                     pdf_sha256=pdf_sha256,
+                    claim_token=claim_token,
                 )
 
             time.sleep(polite_delay)

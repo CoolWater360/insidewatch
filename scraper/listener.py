@@ -214,9 +214,10 @@ def _process_filing_with_ledger(
         logger.info("Filing %d: lost claim race — skipping", filing_id)
         return "skipped"
 
-    # Use the DB's post-increment attempt_count for all subsequent calls.
+    # Use the DB's post-increment values and lease token for all subsequent calls.
     attempt_count = claimed["attempt_count"]
     max_attempts  = claimed.get("max_attempts", 3)
+    claim_token   = claimed["claim_token"]
 
     # Download
     try:
@@ -227,6 +228,7 @@ def _process_filing_with_ledger(
             error=str(exc),
             attempt_count=attempt_count,
             max_attempts=max_attempts,
+            claim_token=claim_token,
         )
         raise
     except Exception as exc:
@@ -235,13 +237,18 @@ def _process_filing_with_ledger(
             error=str(exc),
             attempt_count=attempt_count,
             max_attempts=max_attempts,
+            claim_token=claim_token,
         )
         raise
 
     # Parse
     transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
     if not transactions:
-        filing_ledger.skip_filing(client, filing_id, reason="no transactions parsed from PDF")
+        filing_ledger.skip_filing(
+            client, filing_id,
+            reason="no transactions parsed from PDF",
+            claim_token=claim_token,
+        )
         logger.info("Filing %d: no transactions — skipped", filing_id)
         return "retried" if is_retry else "new"
 
@@ -316,6 +323,7 @@ def _process_filing_with_ledger(
         tx_inserted=tx_inserted,
         tx_dedup=tx_dedup,
         pdf_sha256=pdf_sha256,
+        claim_token=claim_token,
     )
     return "retried" if is_retry else "new"
 

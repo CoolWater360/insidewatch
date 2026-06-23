@@ -258,21 +258,48 @@ def complete_filing(
     tx_inserted: int,
     tx_dedup: int,
     pdf_sha256: Optional[str],
-) -> None:
-    """Mark a filing as successfully completed."""
-    client.table("filings").update({
-        "status":                   "completed",
-        "completed_at":             _now(),
-        "transactions_inserted":    tx_inserted,
-        "transactions_skipped_dedup": tx_dedup,
-        "pdf_sha256":               pdf_sha256,
-        "last_error":               None,
-        "next_attempt_after":       None,
-        "updated_at":               _now(),
-    }).eq("id", filing_id).execute()
+    claim_token: str,
+) -> bool:
+    """
+    Mark a filing as successfully completed.
+
+    The UPDATE is guarded by both filing_id AND claim_token AND status = 'in_progress'.
+    If the token no longer matches — because the reaper cleared it and another worker
+    reclaimed the filing — PostgREST returns 0 rows and this function returns False.
+    The caller must log and halt; it must NOT attempt further writes for this filing.
+
+    Returns True on success, False if the lease has been lost.
+    """
+    result = (
+        client.table("filings")
+        .update({
+            "status":                     "completed",
+            "completed_at":               _now(),
+            "transactions_inserted":      tx_inserted,
+            "transactions_skipped_dedup": tx_dedup,
+            "pdf_sha256":                 pdf_sha256,
+            "last_error":                 None,
+            "next_attempt_after":         None,
+            "claim_token":                None,   # clear on completion
+            "updated_at":                 _now(),
+        })
+        .eq("id", filing_id)
+        .eq("claim_token", claim_token)
+        .eq("status", "in_progress")
+        .execute()
+    )
+    if not result.data:
+        logger.warning(
+            "Filing %d: complete_filing rejected — lease lost "
+            "(claim_token mismatch or status is no longer in_progress). "
+            "Another worker may have reclaimed this filing.",
+            filing_id,
+        )
+        return False
     logger.info(
         "Filing %d completed — %d inserted, %d dedup", filing_id, tx_inserted, tx_dedup
     )
+    return True
 
 
 def fail_filing(
@@ -282,10 +309,13 @@ def fail_filing(
     error: str,
     attempt_count: int,
     max_attempts: int,
-) -> None:
+    claim_token: str,
+) -> bool:
     """
-    Mark a filing as failed.  If attempt_count >= max_attempts, permanently
-    skip it instead so the retry loop never picks it up again.
+    Mark a filing as failed (or permanently skipped if at max_attempts).
+
+    Guarded by claim_token + status = 'in_progress'. Returns False if the
+    lease has been lost; the caller must not write further state for this filing.
     """
     if attempt_count >= max_attempts:
         new_status = "skipped"
@@ -302,23 +332,58 @@ def fail_filing(
             filing_id, attempt_count, max_attempts, next_retry, error,
         )
 
-    client.table("filings").update({
-        "status":             new_status,
-        "last_error":         str(error)[:1000],
-        "next_attempt_after": next_retry,
-        "updated_at":         _now(),
-    }).eq("id", filing_id).execute()
+    result = (
+        client.table("filings")
+        .update({
+            "status":             new_status,
+            "last_error":         str(error)[:1000],
+            "next_attempt_after": next_retry,
+            "claim_token":        None,   # clear the lease on failure
+            "updated_at":         _now(),
+        })
+        .eq("id", filing_id)
+        .eq("claim_token", claim_token)
+        .eq("status", "in_progress")
+        .execute()
+    )
+    if not result.data:
+        logger.warning(
+            "Filing %d: fail_filing rejected — lease lost. Local error was: %.200s",
+            filing_id, error,
+        )
+        return False
+    return True
 
 
-def skip_filing(client, filing_id: int, *, reason: str) -> None:
-    """Permanently skip a filing (empty PDF, consistently blocked, etc.)."""
-    client.table("filings").update({
-        "status":             "skipped",
-        "last_error":         reason[:1000],
-        "next_attempt_after": None,
-        "updated_at":         _now(),
-    }).eq("id", filing_id).execute()
+def skip_filing(client, filing_id: int, *, reason: str, claim_token: str) -> bool:
+    """
+    Permanently skip a filing (empty PDF, blocked, etc.).
+
+    Guarded by claim_token + status = 'in_progress'. Returns False if the
+    lease has been lost.
+    """
+    result = (
+        client.table("filings")
+        .update({
+            "status":             "skipped",
+            "last_error":         reason[:1000],
+            "next_attempt_after": None,
+            "claim_token":        None,
+            "updated_at":         _now(),
+        })
+        .eq("id", filing_id)
+        .eq("claim_token", claim_token)
+        .eq("status", "in_progress")
+        .execute()
+    )
+    if not result.data:
+        logger.warning(
+            "Filing %d: skip_filing rejected — lease lost. Reason was: %.200s",
+            filing_id, reason,
+        )
+        return False
     logger.info("Filing %d skipped: %s", filing_id, reason)
+    return True
 
 
 def get_retryable_filings(client) -> list[dict]:

@@ -59,6 +59,22 @@ def _wire_select(client, data):
            .execute.return_value) = _select_response(data)
 
 
+def _wire_update(client, data=None):
+    """
+    Configure client.table(*).update(*).eq(*)[…].execute() → data.
+    Uses the 'return self' trick on .eq() for any chain length.
+    Default data is non-empty so lease-lost checks pass by default.
+    """
+    if data is None:
+        data = [{"id": 999}]
+    resp = MagicMock()
+    resp.data = data
+    update_mock = client.table.return_value.update.return_value
+    update_mock.eq.return_value = update_mock
+    update_mock.execute.return_value = resp
+    return resp
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -268,17 +284,13 @@ class TestStaleReaper(unittest.TestCase):
         Then on attempt_count=3 it transitions to 'skipped'.
         """
         client = _mock_client()
-        update_resp = MagicMock()
-        update_resp.data = []
-        (client.table.return_value
-               .update.return_value
-               .eq.return_value
-               .execute.return_value) = update_resp
+        _wire_update(client)  # non-empty data so lease checks pass
 
         # Attempt 2 (of 3) fails → should remain 'failed'
         fl.fail_filing(
             client, filing_id=8,
             error="timeout", attempt_count=2, max_attempts=3,
+            claim_token="tok-8",
         )
         payload_2 = client.table.return_value.update.call_args[0][0]
         self.assertEqual(payload_2["status"], "failed",
@@ -289,11 +301,199 @@ class TestStaleReaper(unittest.TestCase):
         fl.fail_filing(
             client, filing_id=8,
             error="timeout again", attempt_count=3, max_attempts=3,
+            claim_token="tok-8",
         )
         payload_3 = client.table.return_value.update.call_args[0][0]
         self.assertEqual(payload_3["status"], "skipped",
             "Attempt 3 of 3 must permanently skip")
         self.assertIsNone(payload_3["next_attempt_after"])
+
+
+class TestClaimLeaseToken(unittest.TestCase):
+    """
+    Lease-token tests.
+
+    Scenario exercised:
+      1. Worker A claims a filing → receives claim_token_A
+      2. The filing becomes stale; the reaper clears claim_token_A and sets
+         status = 'failed'
+      3. Worker B claims the filing → receives claim_token_B
+      4. Worker A attempts complete_filing / fail_filing with claim_token_A
+         → the UPDATE WHERE clause finds no row (token mismatch) → rejected
+      5. Worker B completes the filing with claim_token_B → succeeds
+    """
+
+    TOKEN_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    TOKEN_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    FILING_ID = 100
+    URL = "https://example.com/contested.pdf"
+
+    # ── complete_filing ───────────────────────────────────────────────────────
+
+    def test_worker_a_complete_rejected_after_lease_lost(self):
+        """
+        Worker A's complete_filing is rejected when its token no longer matches.
+        """
+        client_a = _mock_client()
+        _wire_update(client_a, data=[])   # DB returns 0 rows: token mismatch
+
+        ok = fl.complete_filing(
+            client_a, filing_id=self.FILING_ID,
+            tx_inserted=3, tx_dedup=0, pdf_sha256="sha-a",
+            claim_token=self.TOKEN_A,
+        )
+        self.assertFalse(ok, "Worker A's stale complete_filing must be rejected")
+
+    def test_worker_b_complete_succeeds_with_live_token(self):
+        """
+        Worker B's complete_filing succeeds with its current valid token.
+        """
+        client_b = _mock_client()
+        _wire_update(client_b, data=[{"id": self.FILING_ID, "status": "completed"}])
+
+        ok = fl.complete_filing(
+            client_b, filing_id=self.FILING_ID,
+            tx_inserted=3, tx_dedup=0, pdf_sha256="sha-b",
+            claim_token=self.TOKEN_B,
+        )
+        self.assertTrue(ok, "Worker B's complete_filing must succeed")
+
+    def test_complete_clears_claim_token_on_success(self):
+        """
+        complete_filing must set claim_token=None in the UPDATE payload so the
+        token cannot be replayed after a filing is completed.
+        """
+        client = _mock_client()
+        _wire_update(client)
+
+        fl.complete_filing(
+            client, filing_id=self.FILING_ID,
+            tx_inserted=1, tx_dedup=0, pdf_sha256="sha",
+            claim_token=self.TOKEN_B,
+        )
+
+        payload = client.table.return_value.update.call_args[0][0]
+        self.assertIsNone(payload["claim_token"],
+            "claim_token must be cleared (set to None) on completion")
+
+    # ── fail_filing ───────────────────────────────────────────────────────────
+
+    def test_worker_a_fail_rejected_after_lease_lost(self):
+        """
+        Worker A's fail_filing is rejected when its token no longer matches.
+        """
+        client_a = _mock_client()
+        _wire_update(client_a, data=[])   # token mismatch
+
+        ok = fl.fail_filing(
+            client_a, filing_id=self.FILING_ID,
+            error="timeout", attempt_count=1, max_attempts=3,
+            claim_token=self.TOKEN_A,
+        )
+        self.assertFalse(ok, "Worker A's stale fail_filing must be rejected")
+
+    def test_worker_b_fail_succeeds_with_live_token(self):
+        """
+        Worker B's fail_filing succeeds — its token is still current.
+        """
+        client_b = _mock_client()
+        _wire_update(client_b, data=[{"id": self.FILING_ID, "status": "failed"}])
+
+        ok = fl.fail_filing(
+            client_b, filing_id=self.FILING_ID,
+            error="connection reset", attempt_count=1, max_attempts=3,
+            claim_token=self.TOKEN_B,
+        )
+        self.assertTrue(ok, "Worker B's fail_filing must succeed")
+
+    def test_fail_clears_claim_token(self):
+        """fail_filing must clear claim_token in the UPDATE payload."""
+        client = _mock_client()
+        _wire_update(client)
+
+        fl.fail_filing(
+            client, filing_id=self.FILING_ID,
+            error="err", attempt_count=1, max_attempts=3,
+            claim_token=self.TOKEN_B,
+        )
+
+        payload = client.table.return_value.update.call_args[0][0]
+        self.assertIsNone(payload["claim_token"],
+            "claim_token must be cleared on fail_filing")
+
+    # ── skip_filing ───────────────────────────────────────────────────────────
+
+    def test_worker_a_skip_rejected_after_lease_lost(self):
+        """Worker A's skip_filing is rejected after it loses the lease."""
+        client_a = _mock_client()
+        _wire_update(client_a, data=[])
+
+        ok = fl.skip_filing(
+            client_a, filing_id=self.FILING_ID,
+            reason="no transactions",
+            claim_token=self.TOKEN_A,
+        )
+        self.assertFalse(ok)
+
+    def test_worker_b_skip_succeeds(self):
+        """Worker B's skip_filing succeeds with its live token."""
+        client_b = _mock_client()
+        _wire_update(client_b, data=[{"id": self.FILING_ID, "status": "skipped"}])
+
+        ok = fl.skip_filing(
+            client_b, filing_id=self.FILING_ID,
+            reason="no transactions",
+            claim_token=self.TOKEN_B,
+        )
+        self.assertTrue(ok)
+
+    # ── Full scenario ─────────────────────────────────────────────────────────
+
+    def test_only_token_holder_can_write_filing_state(self):
+        """
+        End-to-end scenario:
+          · Worker A claims → TOKEN_A
+          · Reaper clears TOKEN_A (simulated)
+          · Worker B claims → TOKEN_B
+          · Worker A complete → rejected
+          · Worker B complete → succeeds
+          · Only one completion occurs
+        """
+        # Worker A claims
+        client_a = _mock_client()
+        _wire_rpc(client_a, [{"id": self.FILING_ID, "status": "in_progress",
+                               "attempt_count": 1, "max_attempts": 3,
+                               "claim_token": self.TOKEN_A}])
+        claim_a = fl.claim_filing(client_a, filing_id=self.FILING_ID)
+        self.assertIsNotNone(claim_a)
+        self.assertEqual(claim_a["claim_token"], self.TOKEN_A)
+
+        # Worker B claims (reaper has already cleared A's token; B wins)
+        client_b = _mock_client()
+        _wire_rpc(client_b, [{"id": self.FILING_ID, "status": "in_progress",
+                               "attempt_count": 2, "max_attempts": 3,
+                               "claim_token": self.TOKEN_B}])
+        claim_b = fl.claim_filing(client_b, filing_id=self.FILING_ID)
+        self.assertIsNotNone(claim_b)
+        self.assertEqual(claim_b["claim_token"], self.TOKEN_B)
+
+        # Worker A attempts complete with its now-stale token → rejected
+        _wire_update(client_a, data=[])
+        ok_a = fl.complete_filing(
+            client_a, filing_id=self.FILING_ID,
+            tx_inserted=5, tx_dedup=0, pdf_sha256="sha-a",
+            claim_token=self.TOKEN_A,
+        )
+        self.assertFalse(ok_a, "Worker A's stale complete must be rejected")
+
+        # Worker B completes with its live token → succeeds
+        _wire_update(client_b, data=[{"id": self.FILING_ID, "status": "completed"}])
+        ok_b = fl.complete_filing(
+            client_b, filing_id=self.FILING_ID,
+            tx_inserted=5, tx_dedup=0, pdf_sha256="sha-b",
+            claim_token=self.TOKEN_B,
+        )
+        self.assertTrue(ok_b, "Worker B's live complete must succeed")
 
 
 if __name__ == "__main__":

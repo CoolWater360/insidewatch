@@ -51,13 +51,23 @@ def _wire_insert(client, returned_row: dict):
     return resp
 
 
-def _wire_update(client):
-    """Configure client.table(*).update(*).eq(*).execute() → []."""
-    resp = _make_response([])
-    (client.table.return_value
-           .update.return_value
-           .eq.return_value
-           .execute.return_value) = resp
+def _wire_update(client, data=None):
+    """
+    Configure client.table(*).update(*).eq(*)[…].execute() → data.
+
+    Uses the 'return self' trick on .eq() so any number of chained .eq()
+    calls (e.g. .eq("id", x).eq("claim_token", t).eq("status", s)) all
+    resolve to the same mock and return the configured execute() result.
+
+    Default data is [{"id": 999}] — non-empty so that the lease-lost check
+    (if not result.data: …) does not fire unless deliberately set to [].
+    """
+    if data is None:
+        data = [{"id": 999}]
+    resp = _make_response(data)
+    update_mock = client.table.return_value.update.return_value
+    update_mock.eq.return_value = update_mock   # chain .eq() on itself
+    update_mock.execute.return_value = resp
     return resp
 
 
@@ -114,18 +124,21 @@ class TestFilingLifecycle(unittest.TestCase):
         client = _mock_client()
         _wire_update(client)
 
-        fl.complete_filing(
+        ok = fl.complete_filing(
             client, filing_id=1,
             tx_inserted=3, tx_dedup=0,
             pdf_sha256="abc123",
+            claim_token="tok-1",
         )
 
+        self.assertTrue(ok)
         # Confirm update was called with completed status
         update_call = client.table.return_value.update
         payload = update_call.call_args[0][0]
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["transactions_inserted"], 3)
         self.assertEqual(payload["pdf_sha256"], "abc123")
+        self.assertIsNone(payload["claim_token"])
 
     # ── 2. Download failure → failed with backoff ─────────────────────────────
 
@@ -142,6 +155,7 @@ class TestFilingLifecycle(unittest.TestCase):
             error="Connection timeout",
             attempt_count=1,
             max_attempts=3,
+            claim_token="tok-2",
         )
 
         payload = client.table.return_value.update.call_args[0][0]
@@ -168,6 +182,7 @@ class TestFilingLifecycle(unittest.TestCase):
             fl.fail_filing(
                 client, filing_id=99,
                 error="err", attempt_count=attempt, max_attempts=10,
+                claim_token="tok-99",
             )
             payload = client.table.return_value.update.call_args[0][0]
             naa = datetime.fromisoformat(payload["next_attempt_after"])
@@ -189,11 +204,17 @@ class TestFilingLifecycle(unittest.TestCase):
         client = _mock_client()
         _wire_update(client)
 
-        fl.skip_filing(client, filing_id=3, reason="no transactions parsed from PDF")
+        ok = fl.skip_filing(
+            client, filing_id=3,
+            reason="no transactions parsed from PDF",
+            claim_token="tok-3",
+        )
 
+        self.assertTrue(ok)
         payload = client.table.return_value.update.call_args[0][0]
         self.assertEqual(payload["status"], "skipped")
         self.assertIn("no transactions", payload["last_error"])
+        self.assertIsNone(payload["claim_token"])
 
     # ── 4. Failed filing retried successfully after backoff ───────────────────
 
@@ -213,12 +234,14 @@ class TestFilingLifecycle(unittest.TestCase):
         client = _mock_client()
         _wire_update(client)
 
-        fl.complete_filing(
+        ok = fl.complete_filing(
             client, filing_id=4,
             tx_inserted=2, tx_dedup=1,
             pdf_sha256="def456",
+            claim_token="tok-4",
         )
 
+        self.assertTrue(ok)
         payload = client.table.return_value.update.call_args[0][0]
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["transactions_inserted"], 2)
@@ -238,6 +261,7 @@ class TestFilingLifecycle(unittest.TestCase):
             error="blocked by CAPTCHA",
             attempt_count=3,   # == max_attempts
             max_attempts=3,
+            claim_token="tok-5",
         )
 
         payload = client.table.return_value.update.call_args[0][0]
