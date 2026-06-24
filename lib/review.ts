@@ -21,7 +21,7 @@ export interface ReviewTransaction {
   needs_review: boolean;
   review_status: string | null;
   review_reason: string | null;
-  review_notes: string | null;
+  review_notes?: string | null;
   extraction_confidence: number | null;
   classification_rationale: string | null;
   raw_nature_text: string | null;
@@ -104,7 +104,7 @@ export async function getTransactionsForReview(
     .select(
       "id, transaction_date, direction, transaction_type, economic_intent," +
       " quantity, unit_price, total_value, currency, needs_review, review_status," +
-      " review_reason, review_notes, extraction_confidence, classification_rationale," +
+      " review_reason, extraction_confidence, classification_rationale," +
       " raw_nature_text, classification_override, isin," +
       " companies(id, name), insiders(full_name, role)",
       { count: "exact" }
