@@ -705,8 +705,11 @@ def parse_text(
                 insider_name, company, tx_date, quantity, unit_price,
                 transaction_type, all_warnings, isin=isin,
             )
-            classification_conf = _compute_classification_confidence(
-                direction, transaction_type, si_yes_fallback,
+            # Phase 12: classifier now carries its own confidence score.
+            # Apply a small si_yes penalty here because that signal is
+            # parser-level and not visible inside classify().
+            classification_conf = round(
+                max(0.0, clf.confidence - (0.15 if si_yes_fallback else 0.0)), 3
             )
             review_status = "pending_review" if needs_review else "confirmed"
             review_reason = _compute_review_reason(

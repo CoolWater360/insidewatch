@@ -1,16 +1,25 @@
 """
-Transaction classification rules engine — Phase 7.
+Transaction classification rules engine — Phase 7 / Phase 12.
 
 Takes raw extracted fields from the parser and produces a final
 transaction_type (from the extended 13-value taxonomy), economic_intent,
-and a human-readable classification_rationale.
+a human-readable classification_rationale, and a confidence score.
 
 Design principles:
   - Rules are applied in strict priority order; first match wins.
   - Every outcome records a rationale tag so classifications are auditable.
+  - Every outcome carries a confidence score reflecting rule certainty.
   - No DB access — pure function; caller decides what to persist.
   - The parser's direction detection is treated as an authoritative hint;
     the classifier only overrides it when a stronger signal is present.
+
+Confidence levels by rule (0.0–1.0):
+  0.90  zero_price_grant        — unambiguous structural signal
+  0.85  parser_keyword          — keyword was unambiguously matched by parser
+  0.85  raw_nature_keyword      — keyword present in section-4b text
+  0.65  direction_fallthrough   — no specific keyword found; direction used
+  0.40  vague_direction         — direction inferred from weak/fallback signal
+  0.30  undetermined            — direction and type both unknown
 
 Public API
 ----------
@@ -36,7 +45,8 @@ class ClassificationResult:
     transaction_type: str   # one of the 15 taxonomy values
     economic_intent: str    # discretionary | mechanical | unclear
     rationale: str          # "<rule>: <detail>" — stored in DB
-    needs_review: bool = False  # True when classification is uncertain or ambiguous
+    needs_review: bool = False   # True when classification is uncertain or ambiguous
+    confidence: float = 0.5      # 0.0–1.0; see module docstring for per-rule levels
 
 
 # ─── Economic intent mapping ─────────────────────────────────────────────────
@@ -126,6 +136,7 @@ def classify(
         return _result(
             "grant",
             f"zero_price_grant: unit_price=0.0, qty={quantity:.0f}",
+            confidence=0.90,
         )
 
     # ── Rule 2: Parser already resolved to a specific extended type ───────────
@@ -140,57 +151,75 @@ def classify(
         # Special refinement: TRASFERIMENTO keyword defaults to transfer_out
         # but direction=='buy' means it's actually an inbound transfer.
         if parser_type_hint == "transfer_out" and direction == "buy":
-            return _result("transfer_in", "direction_buy_transfer: TRASFERIMENTO + buy direction")
+            return _result("transfer_in", "direction_buy_transfer: TRASFERIMENTO + buy direction", confidence=0.85)
         # DONAZIONE as buy → gift_in; as sell → gift_out (default from parser)
         if parser_type_hint == "gift_out" and direction == "buy":
-            return _result("gift_in", "direction_buy_gift: DONAZIONE + buy direction")
-        return _result(parser_type_hint, f"parser_keyword: {parser_type_hint}")
+            return _result("gift_in", "direction_buy_gift: DONAZIONE + buy direction", confidence=0.85)
+        return _result(parser_type_hint, f"parser_keyword: {parser_type_hint}", confidence=0.85)
 
     # ── Rule 3: Raw nature text keywords (Altro/Other and fallback paths) ─────
     # Applied when the direction map produced 'buy', 'sell', or 'other' and
     # the raw nature text contains a more specific keyword.
+    # All matches in this block carry confidence=0.85 (clear textual evidence).
 
     if _contains(nature, "SUCCESSIONE", "EREDIT", "INHERITANCE", "HEREDIT"):
-        return _result("inheritance", "raw_nature_keyword: inheritance signal in section-4b")
+        return _result("inheritance", "raw_nature_keyword: inheritance signal in section-4b", confidence=0.85)
 
     if _contains(nature, "SOTTOSCRIZIONE", "SUBSCRIPTION", "RIGHTS ISSUE", "AUMENTO"):
-        return _result("subscription", "raw_nature_keyword: subscription/rights issue signal")
+        return _result("subscription", "raw_nature_keyword: subscription/rights issue signal", confidence=0.85)
 
-    if _contains(nature, "CONVERSIONE", "CONVERSION", "CONVERT"):
-        return _result("conversion", "raw_nature_keyword: conversion signal")
+    if _contains(nature, "CONVERSIONE", "CONVERSION", "CONVERT",
+                 "FUSIONE", "SCISSIONE", "MERGER", "DEMERGER"):
+        return _result("conversion", "raw_nature_keyword: conversion/merger/demerger signal", confidence=0.85)
 
-    if _contains(nature, "PERMUTA", "EXCHANGE", "SWAP"):
-        return _result("conversion", "raw_nature_keyword: permuta/exchange signal")
+    if _contains(nature, "PERMUTA", "EXCHANGE", "SWAP", "SCAMBIO"):
+        return _result("conversion", "raw_nature_keyword: permuta/exchange signal", confidence=0.85)
 
     if _contains(nature, "DONAZIONE", "DONATION", "DONATO", "GIFT"):
         tx_type = "gift_in" if direction == "buy" else "gift_out"
-        return _result(tx_type, f"raw_nature_keyword: donation + direction={direction}")
+        return _result(tx_type, f"raw_nature_keyword: donation + direction={direction}", confidence=0.85)
 
     if _contains(nature, "TRASFERIMENTO", "TRANSFER"):
         tx_type = "transfer_in" if direction == "buy" else "transfer_out"
-        return _result(tx_type, f"raw_nature_keyword: transfer + direction={direction}")
+        return _result(tx_type, f"raw_nature_keyword: transfer + direction={direction}", confidence=0.85)
 
     # Pledge / collateral — not a market transaction; signals encumbrance of shares.
     # Keywords: PEGNO (pledge), GARANZIA (guarantee/collateral), VINCOLO (encumbrance)
     if _contains(nature, "PEGNO", "GARANZIA", "VINCOLO", "PLEDGE", "COLLATERAL", "SECURITY INTEREST"):
-        return _result("pledge_or_security", "raw_nature_keyword: pledge/collateral signal")
+        return _result("pledge_or_security", "raw_nature_keyword: pledge/collateral signal", confidence=0.85)
 
     # Derivative transaction — instrument is a derivative over the issuer's shares.
     if _contains(nature, "DERIVAT", "FUTURES", "FORWARD", "CONTRATTO DERIVATO", "DERIVATIVE"):
-        return _result("derivative_transaction", "raw_nature_keyword: derivative instrument signal")
+        return _result("derivative_transaction", "raw_nature_keyword: derivative instrument signal", confidence=0.85)
 
-    if _contains(nature, "ASSEGNAZIONE", "ATTRIBUZIONE", "GRATUITO", "AWARD", "ATTRIBUTION"):
+    if _contains(nature, "ASSEGNAZIONE", "ASSEGNAZIONE GRATUITA", "ATTRIBUZIONE",
+                 "GRATUITO", "AWARD", "ATTRIBUTION"):
         if _contains(nature, "VENDITA", "SELL", "COPERTURA", "COVER"):
-            return _result("sell_to_cover", "raw_nature_keyword: grant+sell → sell_to_cover")
-        return _result("grant", "raw_nature_keyword: assignment/award signal")
+            return _result("sell_to_cover", "raw_nature_keyword: grant+sell → sell_to_cover", confidence=0.85)
+        return _result("grant", "raw_nature_keyword: assignment/award signal", confidence=0.85)
 
-    if _contains(nature, "ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT"):
-        return _result("option_exercise", "raw_nature_keyword: option exercise signal")
+    # Option exercise — includes Italian incentive plan and rights terminology.
+    if _contains(nature, "ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT",
+                 "DIRITTI DI OPZIONE", "PIANO DI INCENTIVAZIONE", "STOCK OPTION", "STOCK GRANT"):
+        return _result("option_exercise", "raw_nature_keyword: option exercise signal", confidence=0.85)
 
     # Sell-to-cover can appear without an explicit grant keyword when the nature
     # text only says the sale is for coverage/tax purposes.
     if direction == "sell" and _contains(nature, "COPERTURA", "COVER", "FISCALE"):
-        return _result("sell_to_cover", "raw_nature_keyword: standalone cover/copertura sell")
+        return _result("sell_to_cover", "raw_nature_keyword: standalone cover/copertura sell", confidence=0.85)
+
+    # Related-entity vehicle — transaction via subsidiary, trust, or fiduciary.
+    # Not necessarily a mechanical event but the beneficial owner chain is indirect;
+    # flag for review so the operator can confirm the economic substance.
+    if _contains(nature, "SOCIETÀ CONTROLLATA", "CONTROLLATA", "FIDUCIARIA",
+                 "FIDUCIARY", "NOMINEE", "TRUST"):
+        tx_type = "transfer_in" if direction == "buy" else "transfer_out"
+        return _result(
+            tx_type,
+            f"raw_nature_keyword: related_entity_vehicle + direction={direction}",
+            needs_review=True,
+            confidence=0.60,
+        )
 
     # ── Rule 4: Direction fallthrough ─────────────────────────────────────────
     # Direction was extracted from a keyword (ACQUISTO/CESSIONE etc.) but no
@@ -212,8 +241,9 @@ def classify(
                 "unknown",
                 "vague_direction: buy inferred from weak signal only",
                 needs_review=True,
+                confidence=0.40,
             )
-        return _result("buy", "direction_fallthrough: buy")
+        return _result("buy", "direction_fallthrough: buy", confidence=0.65)
 
     if direction == "sell":
         if _direction_is_weak:
@@ -221,8 +251,9 @@ def classify(
                 "unknown",
                 "vague_direction: sell inferred from weak signal only",
                 needs_review=True,
+                confidence=0.40,
             )
-        return _result("sell", "direction_fallthrough: sell")
+        return _result("sell", "direction_fallthrough: sell", confidence=0.65)
 
     # ── Rule 5: Source wording/type cannot be determined ─────────────────────
     # 'unknown' is distinct from 'other': the event itself is unreadable,
@@ -231,16 +262,24 @@ def classify(
         "unknown",
         f"undetermined: direction={direction}, hint={parser_type_hint}",
         needs_review=True,
+        confidence=0.30,
     )
 
 
-def _result(tx_type: str, rationale: str, *, needs_review: bool = False) -> ClassificationResult:
+def _result(
+    tx_type: str,
+    rationale: str,
+    *,
+    needs_review: bool = False,
+    confidence: float = 0.5,
+) -> ClassificationResult:
     uncertain = tx_type in ("other", "unknown")
     return ClassificationResult(
         transaction_type=tx_type,
         economic_intent=_economic_intent(tx_type),
         rationale=rationale,
         needs_review=needs_review or uncertain,
+        confidence=round(max(0.0, min(1.0, confidence)), 3),
     )
 
 
