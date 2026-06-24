@@ -171,9 +171,9 @@ jobs:
           # Alert quality filters — override via GitHub repository variables if needed
           ALERT_MIN_VALUE_EUR: "10000"
           ALERT_EXCLUDE_MECHANICAL: "true"
-          # Set to 'backfill' when running an initial full-company sweep to silence
-          # historical alerts. Default 'live' for the regular daily catch-up.
-          ALERT_CONTEXT: "live"
+          # Sweep always runs as backfill: it re-processes filings the listener may
+          # have missed, so historical alerts are suppressed by default.
+          ALERT_CONTEXT: "backfill"
         run: |
           python3 -m scraper.run_phase2 \
             --tier ${{ steps.flags.outputs.max_tier }} \

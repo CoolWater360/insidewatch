@@ -421,6 +421,53 @@ class TestParseDateHelper:
         assert _parse_filed_date("") is None
 
 
+# ─── Workflow config inspection ──────────────────────────────────────────────
+
+class TestWorkflowConfig:
+    """
+    Assert that the GitHub Actions workflow encodes the correct ALERT_CONTEXT
+    for each job.  These are file-inspection tests — they catch drift between
+    the intent (live vs backfill) and what is actually committed to the workflow.
+    """
+
+    @staticmethod
+    def _workflow_text() -> str:
+        import pathlib
+        p = pathlib.Path(".github/workflows/scraper.yml")
+        assert p.exists(), f"Workflow file not found at {p}"
+        return p.read_text()
+
+    def test_listener_context_is_live(self):
+        text = self._workflow_text()
+        # Find the listener job section (before the sweep job header).
+        listener_section = text.split("# ── Job 2: Full sweep")[0]
+        assert 'ALERT_CONTEXT: "live"' in listener_section, (
+            "Listener job must set ALERT_CONTEXT: \"live\""
+        )
+
+    def test_sweep_context_is_backfill(self):
+        text = self._workflow_text()
+        # Find the sweep job section (between job 2 and job 3 headers).
+        sweep_section = text.split("# ── Job 2: Full sweep")[1].split("# ── Job 3:")[0]
+        assert 'ALERT_CONTEXT: "backfill"' in sweep_section, (
+            "Sweep job must set ALERT_CONTEXT: \"backfill\""
+        )
+
+    def test_listener_context_not_backfill(self):
+        text = self._workflow_text()
+        listener_section = text.split("# ── Job 2: Full sweep")[0]
+        assert 'ALERT_CONTEXT: "backfill"' not in listener_section, (
+            "Listener job must not set ALERT_CONTEXT: \"backfill\""
+        )
+
+    def test_sweep_context_not_live(self):
+        text = self._workflow_text()
+        sweep_section = text.split("# ── Job 2: Full sweep")[1].split("# ── Job 3:")[0]
+        assert 'ALERT_CONTEXT: "live"' not in sweep_section, (
+            "Sweep job must not set ALERT_CONTEXT: \"live\""
+        )
+
+
 # ─── MECHANICAL_TRANSACTION_TYPES completeness ────────────────────────────────
 
 class TestMechanicalSet:
