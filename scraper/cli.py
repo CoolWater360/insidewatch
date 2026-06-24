@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Filing ledger CLI — Phase 2.
+Filing ledger CLI — Phase 2 / Phase 11.
 
 Commands:
     inspect   <url-or-id>       Show the full status of a filing.
@@ -17,6 +17,11 @@ Commands:
     verify-storage-lineage      Report completed filings missing storage evidence
                                 (storage_path, file_size_bytes, or pdf_sha256).
                                 Use --fix to reset them to 'failed' for re-processing.
+    backfill-latency            Report latency timestamp coverage across all pipeline
+                                stages.  Identifies filings that lack one or more of
+                                the six latency columns and breaks them down by stage.
+                                Historical filings (pre-014) will show NULL stored_utc —
+                                this is expected and does not indicate data loss.
 
 Usage:
     python3 -m scraper.cli inspect https://...pdf
@@ -32,6 +37,8 @@ Usage:
     python3 -m scraper.cli check-pdf 42
     python3 -m scraper.cli verify-storage-lineage
     python3 -m scraper.cli verify-storage-lineage --fix
+    python3 -m scraper.cli backfill-latency
+    python3 -m scraper.cli backfill-latency --limit 200
 """
 
 import argparse
@@ -51,6 +58,7 @@ if os.path.exists(_env_file):
 
 from .db import get_supabase_client
 from . import filings as filing_ledger
+from .latency import LATENCY_COLUMNS, PIPELINE_STAGES, aggregate_stage_stats, coverage_report
 
 
 logging.basicConfig(
@@ -317,6 +325,66 @@ def cmd_list_failed(client, args) -> int:
     return 0
 
 
+def cmd_backfill_latency(client, args) -> int:
+    """
+    Report latency-timestamp coverage for completed filings.
+
+    Shows how many filings are missing each timestamp column, which stages
+    are computable, and which are blocked by NULL timestamps.  Historical
+    filings (before migration 014) will show stored_utc=NULL for the
+    download→stored and stored→parsed stages; this is expected.
+    """
+    limit = getattr(args, "limit", 500) or 500
+
+    result = (
+        client.table("filings")
+        .select(LATENCY_COLUMNS)
+        .eq("status", "completed")
+        .order("id", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = result.data or []
+
+    if not rows:
+        print("No completed filings found.")
+        return 0
+
+    print(f"\nLatency coverage across {len(rows)} most-recent completed filing(s)\n")
+
+    # Per-column coverage
+    ts_cols = LATENCY_COLUMNS.split(",")
+    print(f"  {'Column':<30}  {'Present':>8}  {'Missing':>8}  {'Coverage':>10}")
+    print("  " + "─" * 60)
+    for col in ts_cols:
+        present = sum(1 for r in rows if r.get(col))
+        missing = len(rows) - present
+        pct     = 100 * present / len(rows)
+        flag    = "  ← expected NULL (pre-014)" if col == "stored_utc" and missing else ""
+        print(f"  {col:<30}  {present:>8}  {missing:>8}  {pct:>9.1f}%{flag}")
+
+    # Per-stage coverage
+    cov = coverage_report(rows)
+    print(f"\n  {'Stage':<30}  {'Coverage':>10}  {'n filings with both ts':>24}")
+    print("  " + "─" * 70)
+    for name, _, _ in PIPELINE_STAGES:
+        frac    = cov.get(name, 0.0)
+        n_both  = round(frac * len(rows))
+        print(f"  {name:<30}  {frac * 100:>9.1f}%  {n_both:>24}")
+
+    # Stage stats for stages with any data
+    stats = aggregate_stage_stats(rows)
+    any_data = {k: v for k, v in stats.items() if v["n"] > 0}
+    if any_data:
+        print(f"\n  Stage latency (seconds)  —  avg / p50 / p95  [n]")
+        print("  " + "─" * 60)
+        for name, s in any_data.items():
+            print(f"  {name:<30}  {s['avg']:>8.1f} / {s['p50']:>8.1f} / {s['p95']:>8.1f}  [{s['n']}]")
+
+    print()
+    return 0
+
+
 # ── Argument parser ───────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -367,6 +435,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reset offending filings to 'failed' so the scraper re-processes them",
     )
 
+    # backfill-latency
+    pbl = sub.add_parser(
+        "backfill-latency",
+        help="Report latency timestamp coverage across all pipeline stages",
+    )
+    pbl.add_argument(
+        "--limit", type=int, default=500, metavar="N",
+        help="Number of most-recent completed filings to analyse (default: 500)",
+    )
+
     return p
 
 
@@ -396,6 +474,7 @@ def main() -> None:
         "reap-stale":               cmd_reap_stale,
         "check-pdf":                cmd_check_pdf,
         "verify-storage-lineage":   cmd_verify_storage_lineage,
+        "backfill-latency":         cmd_backfill_latency,
     }
     sys.exit(dispatch[args.command](client, args))
 

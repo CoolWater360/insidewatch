@@ -297,17 +297,19 @@ class TestOpsReportStructure(unittest.TestCase):
             self.assertIn("n", lat[section])
 
     def test_latency_percentile_calculation(self):
-        from scraper.generate_daily_operations_report import _percentile, _latency_stats
+        # _percentile / _latency_stats moved to scraper.latency as numeric_stats (Phase 11).
+        from scraper.latency import numeric_stats
         vals = [10.0, 20.0, 30.0, 40.0, 50.0]
-        self.assertEqual(_percentile(vals, 50), 30.0)
-        stats = _latency_stats(vals)
+        stats = numeric_stats(vals)
+        self.assertEqual(stats["p50"], 30.0)
         self.assertEqual(stats["n"], 5)
         self.assertEqual(stats["min"], 10.0)
         self.assertEqual(stats["max"], 50.0)
 
     def test_latency_stats_empty_returns_none_fields(self):
-        from scraper.generate_daily_operations_report import _latency_stats
-        stats = _latency_stats([])
+        # _latency_stats moved to scraper.latency as numeric_stats (Phase 11).
+        from scraper.latency import numeric_stats
+        stats = numeric_stats([])
         self.assertEqual(stats["n"], 0)
         self.assertIsNone(stats["avg"])
         self.assertIsNone(stats["p95"])

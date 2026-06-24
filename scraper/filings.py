@@ -431,11 +431,13 @@ def record_storage(
     Raises RuntimeError if the DB update fails.  Callers must treat this as a
     fatal error: mark the filing failed and do not proceed to parse/complete.
     """
+    now = _now()
     result = client.table("filings").update({
         "storage_path":       storage_path,
         "file_size_bytes":    file_size_bytes,
         "raw_extracted_text": raw_extracted_text,
-        "updated_at":         _now(),
+        "stored_utc":         now,   # Phase 11: stamps download→stored latency stage
+        "updated_at":         now,
     }).eq("id", filing_id).execute()
     if getattr(result, "error", None):
         raise RuntimeError(f"record_storage DB error for filing {filing_id}: {result.error}")
