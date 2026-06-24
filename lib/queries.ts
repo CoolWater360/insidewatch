@@ -50,8 +50,10 @@ const SORTABLE_COLUMNS = new Set([
   "total_value",
 ]);
 
+// Alias back to 'companies'/'insiders' so existing UI field accesses are unchanged.
+// PostgREST alias syntax: responseKey:viewName(columns)
 const SELECT_WITH_RELATIONS =
-  "*, companies(id, name, ticker, sector), insiders(full_name, role)";
+  "*, companies:public_companies(id, name, ticker, sector), insiders:public_insiders(full_name, role)";
 
 export async function getTransactions(
   filters: TransactionFilters
@@ -68,7 +70,7 @@ export async function getTransactions(
   const ascending = filters.order === "asc";
 
   let query = supabase
-    .from("transactions")
+    .from("public_transactions")
     .select(SELECT_WITH_RELATIONS, { count: "exact" })
     // Exclude non-cash corporate awards (grants, option exercises).
     // IMPORTANT: PostgREST .neq() generates `col <> value` which evaluates to
@@ -105,7 +107,7 @@ export async function getTransactions(
 export async function getCompanies(): Promise<Company[]> {
   const supabase = getSupabase();
   if (!supabase) return [];
-  const { data, error } = await supabase.from("companies").select("*").order("name");
+  const { data, error } = await supabase.from("public_companies").select("*").order("name");
   if (error) {
     console.error("getCompanies error:", error.message);
     return [];
@@ -117,7 +119,7 @@ export async function getCompanyById(id: number): Promise<Company | null> {
   const supabase = getSupabase();
   if (!supabase) return null;
   const { data, error } = await supabase
-    .from("companies")
+    .from("public_companies")
     .select("*")
     .eq("id", id)
     .single();
@@ -138,19 +140,19 @@ export async function getCompanyStats(companyId: number): Promise<CompanyStats> 
   if (!supabase) return zero;
 
   const base = supabase
-    .from("transactions")
+    .from("public_transactions")
     .select("id", { count: "exact", head: true })
     .eq("company_id", companyId);
 
   const [all, buys, sells] = await Promise.all([
     base,
     supabase
-      .from("transactions")
+      .from("public_transactions")
       .select("id", { count: "exact", head: true })
       .eq("company_id", companyId)
       .eq("direction", "buy"),
     supabase
-      .from("transactions")
+      .from("public_transactions")
       .select("id", { count: "exact", head: true })
       .eq("company_id", companyId)
       .eq("direction", "sell"),
@@ -185,16 +187,16 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const weekAgoStr = weekAgo.toISOString().slice(0, 10);
 
   const [total, companies, weekTx, lastTx] = await Promise.all([
-    supabase.from("transactions").select("id", { count: "exact", head: true }),
-    supabase.from("companies").select("id", { count: "exact", head: true }),
+    supabase.from("public_transactions").select("id", { count: "exact", head: true }),
+    supabase.from("public_companies").select("id", { count: "exact", head: true }),
     supabase
-      .from("transactions")
+      .from("public_transactions")
       .select("direction, total_value")
       .gte("transaction_date", weekAgoStr),
     supabase
-      .from("transactions")
-      .select("created_at")
-      .order("created_at", { ascending: false })
+      .from("public_transactions")
+      .select("filed_date")
+      .order("filed_date", { ascending: false })
       .limit(1),
   ]);
 
@@ -208,7 +210,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     weekBuyValue,
     weekSellValue,
     companiesTracked:  companies.count ?? 0,
-    lastUpdatedAt:     lastTx.data?.[0]?.created_at ?? null,
+    lastUpdatedAt:     lastTx.data?.[0]?.filed_date ?? null,
   };
 }
 
@@ -237,10 +239,10 @@ export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSigna
   const sinceStr = since.toISOString().slice(0, 10);
 
   const { data, error } = await supabase
-    .from("transactions")
+    .from("public_transactions")
     .select(
       "company_id, transaction_date, quantity, total_value, transaction_type," +
-      " companies(id, name), insiders(full_name, role)"
+      " companies:public_companies(id, name), insiders:public_insiders(full_name, role)"
     )
     .eq("direction", "buy")
     .gte("transaction_date", sinceStr)
