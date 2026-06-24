@@ -160,7 +160,15 @@ def classify(
     # ── Rule 3: Raw nature text keywords (Altro/Other and fallback paths) ─────
     # Applied when the direction map produced 'buy', 'sell', or 'other' and
     # the raw nature text contains a more specific keyword.
-    # All matches in this block carry confidence=0.85 (clear textual evidence).
+    #
+    # Two important ordering constraints:
+    #   a) DIRITTI DI OPZIONE must be checked before the OPZION substring catch-all
+    #      because "OPZIONE" contains the substring "OPZION", which would otherwise
+    #      silently promote subscription-rights events to option_exercise.
+    #   b) FUSIONE/SCISSIONE are separated from CONVERSIONE: they are corporate
+    #      restructuring events where the economic mechanism varies and always
+    #      warrant operator review, so they receive a lower confidence (0.75) than
+    #      an explicit CONVERSIONE keyword (0.85).
 
     if _contains(nature, "SUCCESSIONE", "EREDIT", "INHERITANCE", "HEREDIT"):
         return _result("inheritance", "raw_nature_keyword: inheritance signal in section-4b", confidence=0.85)
@@ -168,9 +176,26 @@ def classify(
     if _contains(nature, "SOTTOSCRIZIONE", "SUBSCRIPTION", "RIGHTS ISSUE", "AUMENTO"):
         return _result("subscription", "raw_nature_keyword: subscription/rights issue signal", confidence=0.85)
 
-    if _contains(nature, "CONVERSIONE", "CONVERSION", "CONVERT",
-                 "FUSIONE", "SCISSIONE", "MERGER", "DEMERGER"):
-        return _result("conversion", "raw_nature_keyword: conversion/merger/demerger signal", confidence=0.85)
+    # DIRITTI DI OPZIONE — checked before the generic OPZION substring catch-all.
+    # In CONSOB filings this phrase describes either:
+    #   (a) employee stock-option rights exercised by the insider (→ option_exercise), or
+    #   (b) pre-emptive subscription rights in a capital increase (→ subscription).
+    # Require an explicit exercise verb to confidently pick (a); without it, default
+    # to subscription with needs_review so the operator can confirm the substance.
+    if _contains(nature, "DIRITTI DI OPZIONE"):
+        if _contains(nature, "ESERCIZIO", "EXERCISE"):
+            return _result("option_exercise",
+                           "raw_nature_keyword: ESERCIZIO DIRITTI DI OPZIONE",
+                           confidence=0.85)
+        return _result("subscription",
+                       "raw_nature_keyword: DIRITTI DI OPZIONE without exercise verb "
+                       "(possible subscription rights — verify)",
+                       needs_review=True,
+                       confidence=0.70)
+
+    # Explicit conversion keyword (instrument or security is converted).
+    if _contains(nature, "CONVERSIONE", "CONVERSION", "CONVERT"):
+        return _result("conversion", "raw_nature_keyword: conversion signal", confidence=0.85)
 
     if _contains(nature, "PERMUTA", "EXCHANGE", "SWAP", "SCAMBIO"):
         return _result("conversion", "raw_nature_keyword: permuta/exchange signal", confidence=0.85)
@@ -192,15 +217,18 @@ def classify(
     if _contains(nature, "DERIVAT", "FUTURES", "FORWARD", "CONTRATTO DERIVATO", "DERIVATIVE"):
         return _result("derivative_transaction", "raw_nature_keyword: derivative instrument signal", confidence=0.85)
 
+    # Grant / free-share award — STOCK GRANT is a free-share allocation, not an exercise.
     if _contains(nature, "ASSEGNAZIONE", "ASSEGNAZIONE GRATUITA", "ATTRIBUZIONE",
-                 "GRATUITO", "AWARD", "ATTRIBUTION"):
+                 "GRATUITO", "AWARD", "ATTRIBUTION", "STOCK GRANT"):
         if _contains(nature, "VENDITA", "SELL", "COPERTURA", "COVER"):
             return _result("sell_to_cover", "raw_nature_keyword: grant+sell → sell_to_cover", confidence=0.85)
-        return _result("grant", "raw_nature_keyword: assignment/award signal", confidence=0.85)
+        return _result("grant", "raw_nature_keyword: assignment/award/stock-grant signal", confidence=0.85)
 
-    # Option exercise — includes Italian incentive plan and rights terminology.
+    # Option exercise — unambiguous exercise signals.
+    # DIRITTI DI OPZIONE is intentionally absent here (handled above).
+    # STOCK GRANT is intentionally absent here (it is a grant, not an exercise).
     if _contains(nature, "ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT",
-                 "DIRITTI DI OPZIONE", "PIANO DI INCENTIVAZIONE", "STOCK OPTION", "STOCK GRANT"):
+                 "PIANO DI INCENTIVAZIONE", "STOCK OPTION"):
         return _result("option_exercise", "raw_nature_keyword: option exercise signal", confidence=0.85)
 
     # Sell-to-cover can appear without an explicit grant keyword when the nature
@@ -208,17 +236,42 @@ def classify(
     if direction == "sell" and _contains(nature, "COPERTURA", "COVER", "FISCALE"):
         return _result("sell_to_cover", "raw_nature_keyword: standalone cover/copertura sell", confidence=0.85)
 
-    # Related-entity vehicle — transaction via subsidiary, trust, or fiduciary.
-    # Not necessarily a mechanical event but the beneficial owner chain is indirect;
-    # flag for review so the operator can confirm the economic substance.
-    if _contains(nature, "SOCIETÀ CONTROLLATA", "CONTROLLATA", "FIDUCIARIA",
-                 "FIDUCIARY", "NOMINEE", "TRUST"):
-        tx_type = "transfer_in" if direction == "buy" else "transfer_out"
+    # Merger / demerger — corporate restructuring events are classified as
+    # conversion (shares exchanged at a fixed ratio), but the exact economic
+    # mechanism varies and always warrants operator review.  Confidence is 0.75
+    # rather than 0.85 to reflect this additional uncertainty.
+    # Kept after the explicit CONVERSIONE check so that a filing that says both
+    # "conversione" and "fusione" is resolved by the stronger CONVERSIONE signal.
+    if _contains(nature, "FUSIONE", "SCISSIONE", "MERGER", "DEMERGER"):
+        return _result("conversion",
+                       "raw_nature_keyword: merger/demerger — conversion mechanism needs review",
+                       needs_review=True,
+                       confidence=0.75)
+
+    # Vehicle / relationship context — describes the entity through which the
+    # transaction is executed, NOT the nature of the transaction itself.
+    #
+    # An insider who buys shares via a family trust or subsidiary is still making
+    # a discretionary buy; auto-classifying as transfer_in / transfer_out would
+    # misrepresent the economic intent.  Instead we preserve the direction-based
+    # type and flag for review so the operator can confirm the substance.
+    #
+    # Deliberately excluded: standalone "CONTROLLATA" — too generic in Italian
+    # (means "controlled/subsidiary" and appears in many unrelated contexts).
+    if _contains(nature, "SOCIETÀ CONTROLLATA", "FIDUCIARIA", "FIDUCIARY",
+                 "NOMINEE", "TRUST"):
+        if direction == "unknown":
+            return _result("unknown",
+                           "vehicle_context: related entity vehicle, direction unknown",
+                           needs_review=True,
+                           confidence=0.35)
+        tx_type = "buy" if direction == "buy" else "sell"
         return _result(
             tx_type,
-            f"raw_nature_keyword: related_entity_vehicle + direction={direction}",
+            f"vehicle_context: transaction via related entity ({direction}) — "
+            "verify beneficial owner and economic substance",
             needs_review=True,
-            confidence=0.60,
+            confidence=0.55,
         )
 
     # ── Rule 4: Direction fallthrough ─────────────────────────────────────────

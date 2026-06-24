@@ -6,8 +6,16 @@ Covers:
   - new Italian keywords (ASSEGNAZIONE GRATUITA, DIRITTI DI OPZIONE,
     PIANO DI INCENTIVAZIONE, FUSIONE, SCISSIONE, SCAMBIO,
     SOCIETÀ CONTROLLATA, FIDUCIARIA)
-  - confidence levels per rule (0.90 / 0.85 / 0.65 / 0.40 / 0.30)
-  - related-entity vehicle classification with needs_review=True
+  - confidence levels per rule (0.90 / 0.85 / 0.75 / 0.70 / 0.65 / 0.55 / 0.40 / 0.30)
+  - vehicle-context classification with needs_review=True (Phase 12 correction)
+
+Phase 12 correction notes (amended expectations):
+  - FUSIONE/SCISSIONE → conversion + needs_review=True + confidence=0.75 (not 0.85)
+  - SOCIETÀ CONTROLLATA/FIDUCIARIA/TRUST/NOMINEE → direction-based (buy/sell),
+    NOT transfer_in/transfer_out; needs_review=True, confidence=0.55
+  - Standalone CONTROLLATA keyword removed (too generic; no vehicle match)
+  - DIRITTI DI OPZIONE without exercise verb → subscription + needs_review=True + confidence=0.70
+  - STOCK GRANT → grant (free-share allocation), NOT option_exercise
 """
 
 import pytest
@@ -120,50 +128,61 @@ class TestNewItalianKeywords:
         assert r.transaction_type in ("option_exercise", "grant")
         assert r.confidence == pytest.approx(0.85, abs=0.001)
 
-    def test_fusione_is_conversion(self):
+    def test_fusione_is_conversion_needs_review(self):
+        # FUSIONE is a merger event: correct type is conversion, but mechanism
+        # varies — always needs operator review.  Confidence 0.75 not 0.85.
         r = _clf(direction="buy", nature="FUSIONE PER INCORPORAZIONE", unit_price=5.0, quantity=100.0)
         assert r.transaction_type == "conversion"
-        assert r.confidence == pytest.approx(0.85, abs=0.001)
+        assert r.needs_review is True
+        assert r.confidence == pytest.approx(0.75, abs=0.001)
 
-    def test_scissione_is_conversion(self):
+    def test_scissione_is_conversion_needs_review(self):
+        # SCISSIONE (demerger/spin-off): same reasoning as FUSIONE.
         r = _clf(direction="sell", nature="SCISSIONE PARZIALE", unit_price=5.0, quantity=100.0)
         assert r.transaction_type == "conversion"
-        assert r.confidence == pytest.approx(0.85, abs=0.001)
+        assert r.needs_review is True
+        assert r.confidence == pytest.approx(0.75, abs=0.001)
 
     def test_scambio_is_conversion(self):
         r = _clf(direction="buy", nature="SCAMBIO DI AZIONI", unit_price=5.0, quantity=100.0)
         assert r.transaction_type == "conversion"
         assert r.confidence == pytest.approx(0.85, abs=0.001)
 
-    def test_societa_controllata_buy_is_transfer_in_needs_review(self):
+    def test_societa_controllata_buy_preserves_direction(self):
+        # SOCIETÀ CONTROLLATA describes the vehicle, not the transaction type.
+        # An insider buying through a subsidiary is still buying.
         r = _clf(direction="buy", nature="ACQUISTO TRAMITE SOCIETÀ CONTROLLATA", unit_price=5.0, quantity=100.0)
-        assert r.transaction_type == "transfer_in"
+        assert r.transaction_type == "buy"          # NOT transfer_in
         assert r.needs_review is True
-        assert r.confidence == pytest.approx(0.60, abs=0.001)
+        assert r.confidence == pytest.approx(0.55, abs=0.001)
 
-    def test_societa_controllata_sell_is_transfer_out_needs_review(self):
+    def test_societa_controllata_sell_preserves_direction(self):
         r = _clf(direction="sell", nature="CESSIONE TRAMITE SOCIETÀ CONTROLLATA", unit_price=5.0, quantity=100.0)
-        assert r.transaction_type == "transfer_out"
+        assert r.transaction_type == "sell"         # NOT transfer_out
         assert r.needs_review is True
-        assert r.confidence == pytest.approx(0.60, abs=0.001)
+        assert r.confidence == pytest.approx(0.55, abs=0.001)
 
-    def test_fiduciaria_is_related_entity_needs_review(self):
+    def test_fiduciaria_buy_preserves_direction(self):
         r = _clf(direction="buy", nature="ACQUISTO TRAMITE FIDUCIARIA", unit_price=5.0, quantity=100.0)
-        assert r.transaction_type == "transfer_in"
+        assert r.transaction_type == "buy"          # NOT transfer_in
         assert r.needs_review is True
 
-    def test_controllata_keyword_alone(self):
+    def test_controllata_standalone_no_vehicle_match(self):
+        # Standalone "CONTROLLATA" is too generic; does NOT trigger the vehicle rule.
+        # Falls through to direction fallthrough → buy, no needs_review.
         r = _clf(direction="buy", nature="OPERAZIONE TRAMITE CONTROLLATA", unit_price=5.0, quantity=100.0)
-        assert r.transaction_type == "transfer_in"
-        assert r.needs_review is True
+        assert r.transaction_type == "buy"
+        assert r.needs_review is False
 
-    def test_merger_english_is_conversion(self):
+    def test_merger_english_is_conversion_needs_review(self):
         r = _clf(direction="buy", nature="MERGER WITH ACQUIROR", unit_price=5.0, quantity=100.0)
         assert r.transaction_type == "conversion"
+        assert r.needs_review is True
 
-    def test_demerger_english_is_conversion(self):
+    def test_demerger_english_is_conversion_needs_review(self):
         r = _clf(direction="buy", nature="DEMERGER TRANSACTION", unit_price=5.0, quantity=100.0)
         assert r.transaction_type == "conversion"
+        assert r.needs_review is True
 
 
 # ─── Existing keywords still work ─────────────────────────────────────────────
@@ -212,8 +231,9 @@ class TestKeywordPriority:
         r = _clf(direction="buy", nature="PIANO DI INCENTIVAZIONE", unit_price=5.0)
         assert r.transaction_type == "option_exercise"
 
-    def test_related_entity_lower_confidence_than_pure_keyword(self):
-        # Related entity: 0.60; pure keyword: 0.85
-        r_related = _clf(direction="buy", nature="TRAMITE SOCIETÀ CONTROLLATA", unit_price=5.0)
+    def test_vehicle_context_lower_confidence_than_pure_keyword(self):
+        # Vehicle context: 0.55; pure nature keyword: 0.85
+        r_vehicle = _clf(direction="buy", nature="TRAMITE SOCIETÀ CONTROLLATA", unit_price=5.0)
         r_keyword  = _clf(direction="buy", nature="SUCCESSIONE EREDITARIA", unit_price=5.0)
-        assert r_related.confidence < r_keyword.confidence
+        assert r_vehicle.confidence < r_keyword.confidence
+        assert r_vehicle.confidence == pytest.approx(0.55, abs=0.001)
