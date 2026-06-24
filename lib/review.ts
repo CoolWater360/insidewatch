@@ -27,8 +27,26 @@ export interface ReviewTransaction {
   raw_nature_text: string | null;
   classification_override: boolean;
   isin: string | null;
+  source_url: string | null;
+  source_filing_id: number | null;
   companies: { id: number; name: string } | null;
   insiders: { full_name: string; role: string | null } | null;
+}
+
+export interface FilingDetail {
+  id: number;
+  pdf_url: string;
+  filing_date: string | null;
+  company_name: string | null;
+  status: string;
+  attempt_count: number;
+  last_attempted_at: string | null;
+  last_error: string | null;
+  scraper_version: string | null;
+  transactions_inserted: number;
+  pdf_sha256: string | null;
+  has_stored_document: boolean;
+  file_size_bytes: number | null;
 }
 
 export interface ReviewFiling {
@@ -107,6 +125,7 @@ export async function getTransactionsForReview(
       " quantity, unit_price, total_value, currency, needs_review, review_status," +
       " review_reason, extraction_confidence, classification_rationale," +
       " raw_nature_text, classification_override, isin," +
+      " source_url, source_filing_id," +
       " companies(id, name), insiders(full_name, role)",
       { count: "exact" }
     )
@@ -199,5 +218,43 @@ export async function getUnmatchedIssuers(
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+  };
+}
+
+// ─── Filing detail ────────────────────────────────────────────────────────────
+
+export async function getFilingById(id: number): Promise<FilingDetail | null> {
+  const db = getSupabaseServer();
+
+  const { data, error } = await db
+    .from("filings")
+    .select(
+      "id, pdf_url, filing_date, company_name, status, attempt_count," +
+      " last_attempted_at, last_error, scraper_version, transactions_inserted," +
+      " pdf_sha256, storage_path, file_size_bytes"
+    )
+    .eq("id", id)
+    .single();
+
+  if (error) {
+    console.error("getFilingById error:", error.message);
+    return null;
+  }
+
+  const raw = data as unknown as Record<string, unknown>;
+  return {
+    id: raw.id as number,
+    pdf_url: raw.pdf_url as string,
+    filing_date: (raw.filing_date as string | null) ?? null,
+    company_name: (raw.company_name as string | null) ?? null,
+    status: raw.status as string,
+    attempt_count: raw.attempt_count as number,
+    last_attempted_at: (raw.last_attempted_at as string | null) ?? null,
+    last_error: (raw.last_error as string | null) ?? null,
+    scraper_version: (raw.scraper_version as string | null) ?? null,
+    transactions_inserted: raw.transactions_inserted as number,
+    pdf_sha256: (raw.pdf_sha256 as string | null) ?? null,
+    has_stored_document: raw.storage_path != null,
+    file_size_bytes: (raw.file_size_bytes as number | null) ?? null,
   };
 }

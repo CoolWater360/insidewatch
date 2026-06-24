@@ -43,6 +43,7 @@ export default async function TransactionReviewPage({ searchParams }: Props) {
                   <th className="px-4 py-2">Type</th>
                   <th className="px-4 py-2">Conf</th>
                   <th className="px-4 py-2">Rationale / Reason</th>
+                  <th className="px-4 py-2">Source</th>
                   <th className="px-4 py-2">Actions</th>
                 </tr>
               </thead>
@@ -121,6 +122,33 @@ export default async function TransactionReviewPage({ searchParams }: Props) {
                           "{tx.raw_nature_text}"
                         </div>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1">
+                        {tx.source_url ? (
+                          <a
+                            href={tx.source_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-400 hover:text-blue-300 hover:underline"
+                          >
+                            PDF ↗
+                          </a>
+                        ) : null}
+                        {tx.source_filing_id ? (
+                          <a
+                            href={`/internal/filings/${tx.source_filing_id}`}
+                            className="text-xs text-amber-400 hover:text-amber-300 hover:underline"
+                          >
+                            Filing #{tx.source_filing_id}
+                          </a>
+                        ) : null}
+                        {!tx.source_url && !tx.source_filing_id ? (
+                          <span className="text-xs text-muted italic">
+                            No source document available for this legacy record
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <ReviewActions

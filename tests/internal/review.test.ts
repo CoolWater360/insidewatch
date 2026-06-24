@@ -11,6 +11,7 @@
 import {
   getReviewQueueCounts,
   getTransactionsForReview,
+  getFilingById,
 } from "../../lib/review";
 
 // ─── Mock lib/supabase-server ─────────────────────────────────────────────────
@@ -86,8 +87,26 @@ const TX_ROW = {
   raw_nature_text: "ACQUISTO SUL MERCATO",
   classification_override: false,
   isin: "IT0001234567",
+  source_url: "https://example.euronext.com/filing/123.pdf",
+  source_filing_id: 7,
   companies: { id: 42, name: "Acme SpA" },
   insiders: { full_name: "Mario Rossi", role: "CEO" },
+};
+
+const FILING_ROW = {
+  id: 7,
+  pdf_url: "https://example.euronext.com/filing/123.pdf",
+  filing_date: "2026-01-15",
+  company_name: "Acme SpA",
+  status: "completed",
+  attempt_count: 1,
+  last_attempted_at: "2026-01-15T09:00:00Z",
+  last_error: null,
+  scraper_version: "1.2.0",
+  transactions_inserted: 1,
+  pdf_sha256: "abc123",
+  storage_path: "filings/2026/01/abc123.pdf",
+  file_size_bytes: 204800,
 };
 
 // ─── getReviewQueueCounts ─────────────────────────────────────────────────────
@@ -148,6 +167,14 @@ describe("getTransactionsForReview", () => {
     expect(result.totalPages).toBe(2);
   });
 
+  it("selects source_url and source_filing_id", async () => {
+    setMock([TX_ROW], 1, null);
+    await getTransactionsForReview(1, 25);
+    const selectArg = (_chain.select as jest.Mock).mock.calls[0][0] as string;
+    expect(selectArg).toContain("source_url");
+    expect(selectArg).toContain("source_filing_id");
+  });
+
   it("does NOT select review_notes — migration 007 column absent from base schema", async () => {
     // This is the root-cause regression guard: if review_notes were re-added to
     // the SELECT and migration 007 is not applied in production, PostgREST
@@ -172,5 +199,58 @@ describe("getTransactionsForReview", () => {
     setMock([TX_ROW], 1, null);
     const result = await getTransactionsForReview(1, 25);
     expect(result.queryError).toBeUndefined();
+  });
+});
+
+// ─── getFilingById ────────────────────────────────────────────────────────────
+
+describe("getFilingById", () => {
+  it("returns FilingDetail with has_stored_document=true when storage_path set", async () => {
+    setMock([FILING_ROW], null, null);
+    // single() resolves the array to one item — mock returns the row in data
+    _chain["single"] = jest.fn(() =>
+      Promise.resolve({ data: FILING_ROW, error: null })
+    );
+    mockSupabase.from.mockImplementation(() => _chain);
+
+    const result = await getFilingById(7);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe(7);
+    expect(result!.pdf_url).toBe("https://example.euronext.com/filing/123.pdf");
+    expect(result!.has_stored_document).toBe(true);
+    expect(result!.file_size_bytes).toBe(204800);
+    expect(result!.pdf_sha256).toBe("abc123");
+  });
+
+  it("has_stored_document is false when storage_path is null", async () => {
+    const noStorage = { ...FILING_ROW, storage_path: null };
+    _chain["single"] = jest.fn(() =>
+      Promise.resolve({ data: noStorage, error: null })
+    );
+    mockSupabase.from.mockImplementation(() => _chain);
+
+    const result = await getFilingById(7);
+    expect(result!.has_stored_document).toBe(false);
+  });
+
+  it("returns null on error (filing not found)", async () => {
+    _chain["single"] = jest.fn(() =>
+      Promise.resolve({ data: null, error: { message: "No rows found" } })
+    );
+    mockSupabase.from.mockImplementation(() => _chain);
+
+    const result = await getFilingById(9999);
+    expect(result).toBeNull();
+  });
+
+  it("does not expose storage_path in the returned object", async () => {
+    _chain["single"] = jest.fn(() =>
+      Promise.resolve({ data: FILING_ROW, error: null })
+    );
+    mockSupabase.from.mockImplementation(() => _chain);
+
+    const result = await getFilingById(7);
+    expect(result).not.toBeNull();
+    expect("storage_path" in result!).toBe(false);
   });
 });
