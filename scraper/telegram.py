@@ -35,7 +35,11 @@ def _fmt_date(iso: str) -> str:
         return iso
 
 
-def _build_message(payload, cluster: Optional[dict]) -> str:
+def _build_message(
+    payload,
+    cluster: Optional[dict],
+    late_discovery: bool = False,
+) -> str:
     """Return a Markdown message string (Telegram's legacy Markdown v1 syntax)."""
     dir_emoji = "🟢" if payload.direction == "buy" else "🔴"
     dir_label = "ACQUISTO" if payload.direction == "buy" else "VENDITA"
@@ -48,6 +52,9 @@ def _build_message(payload, cluster: Optional[dict]) -> str:
         f"📅 {_fmt_date(payload.transaction_date)}",
     ]
 
+    if late_discovery and payload.filed_date:
+        lines.append(f"⏰ *Tarda scoperta* — pubbl. {_fmt_date(payload.filed_date)}")
+
     if cluster and payload.direction == "buy":
         combined = _fmt_value(cluster["combined_value"])
         lines.append(
@@ -58,7 +65,7 @@ def _build_message(payload, cluster: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-def send_telegram(payload, cluster: Optional[dict]) -> bool:
+def send_telegram(payload, cluster: Optional[dict], late_discovery: bool = False) -> bool:
     """Send alert via Telegram Bot API.  Returns True on success."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID", "")
@@ -70,7 +77,7 @@ def send_telegram(payload, cluster: Optional[dict]) -> bool:
         logger.debug("TELEGRAM_CHANNEL_ID not set — skipping Telegram")
         return False
 
-    text = _build_message(payload, cluster)
+    text = _build_message(payload, cluster, late_discovery=late_discovery)
     url = f"{_TELEGRAM_API}/bot{bot_token}/sendMessage"
 
     try:

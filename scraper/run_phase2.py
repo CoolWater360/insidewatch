@@ -261,6 +261,7 @@ def _crawl_company(
                     tx_inserted += 1
                     if tx.insider_verified and not tx.needs_review and result["company_id"]:
                         try:
+                            alert_context = os.getenv("ALERT_CONTEXT", "live")
                             dispatch(
                                 AlertPayload(
                                     company_name=tx.company_name,
@@ -280,6 +281,7 @@ def _crawl_company(
                                 ),
                                 client=client,
                                 company_tier=company_tier,
+                                context=alert_context,
                             )
                         except Exception as alert_exc:
                             logger.warning("Alert dispatch error: %s", alert_exc)

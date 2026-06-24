@@ -2,7 +2,7 @@
 Alert dispatcher for InsideWatch.
 
 Single entry point: dispatch(payload, client, company_tier)
-Currently sends email via Resend.  Telegram seam is active.
+Sends email via Resend and Telegram via Bot API.
 
 Required env vars:
   RESEND_API_KEY       — Resend secret key
@@ -11,13 +11,22 @@ Required env vars:
   TELEGRAM_BOT_TOKEN   — Telegram bot token from @BotFather
   TELEGRAM_CHANNEL_ID  — Channel username or numeric chat ID
 
-Alert quality filters (all configurable via env vars):
-  ALERT_MIN_VALUE_EUR        — suppress alerts below this total value (default: 50000)
-  ALERT_EXCLUDE_MECHANICAL   — skip non-discretionary event types (default: true)
-  ALERT_MAX_FILING_AGE_DAYS  — suppress alerts for old filings (default: 5; 0 = disabled)
+Alert quality filters (configurable via env vars):
+  ALERT_MIN_VALUE_EUR      — suppress alerts below this total value (default: 10000)
+  ALERT_EXCLUDE_MECHANICAL — skip non-discretionary event types (default: true)
 
-Pass urgent=True to dispatch() to bypass all quality filters (e.g. for
-high-priority review-failure notifications).
+Ingestion context:
+  ALERT_CONTEXT  — 'live' (default) or 'backfill'
+  During 'backfill' context all transaction alerts are suppressed; use this
+  when running reprocess_historical or an initial full-company sweep so that
+  a large batch of historical inserts does not flood alert channels.
+  During 'live' context alerts fire normally. Filings whose filed_date is
+  older than _LATE_DISCOVERY_DAYS calendar days are labelled [LATE] in the
+  subject and body so the operator knows the alert relates to a document that
+  was not discovered on its original publication date.
+
+Pass urgent=True to dispatch() to bypass all quality filters regardless of
+context (hard gates on tier and direction still apply).
 """
 
 import logging
@@ -32,8 +41,14 @@ logger = logging.getLogger(__name__)
 
 RESEND_API = "https://api.resend.com/emails"
 
+# Filings discovered more than this many calendar days after their filed_date
+# are labelled [LATE] in live-context alerts.  This is a labelling threshold
+# only — it never suppresses an alert.
+# 5 days ≈ MAR 3-business-day disclosure deadline + 2 calendar-day buffer.
+_LATE_DISCOVERY_DAYS = 5
+
 # Transaction types that represent mechanical / non-discretionary events.
-# Updated in sync with classifier.py's mechanical taxonomy.
+# Kept in sync with classifier.py's mechanical taxonomy.
 MECHANICAL_TRANSACTION_TYPES: frozenset = frozenset({
     "grant",
     "option_exercise",
@@ -74,52 +89,38 @@ class AlertPayload:
 @dataclass
 class AlertConfig:
     """Quality thresholds for alert suppression. Loaded from environment."""
-    # Minimum total transaction value (in reporting currency) to fire an alert.
-    # Transactions below this threshold are suppressed as noise.
-    # Default: 50 000 — the MAR Art.19 single-transaction reporting threshold.
-    min_value_eur: float = 50_000.0
+    # Minimum total transaction value to fire an alert.
+    # Default: 10 000 — practical noise floor for institutional signal workflows.
+    min_value_eur: float = 10_000.0
 
     # When True, mechanical/non-discretionary event types (grants, exercises,
     # transfers, conversions) are suppressed. These are not trading signals.
     exclude_mechanical: bool = True
 
-    # Suppress alerts for filings older than this many calendar days.
-    # Protects against alert floods during initial backfills and sweep runs.
-    # 0 = disabled (all ages pass). Default: 5 (> MAR 3-business-day deadline).
-    max_filing_age_days: int = 5
-
 
 def _load_alert_config() -> AlertConfig:
     """Read AlertConfig from environment variables."""
-    raw_min = os.getenv("ALERT_MIN_VALUE_EUR", "50000")
+    raw_min = os.getenv("ALERT_MIN_VALUE_EUR", "10000")
     raw_mech = os.getenv("ALERT_EXCLUDE_MECHANICAL", "true")
-    raw_age = os.getenv("ALERT_MAX_FILING_AGE_DAYS", "5")
 
     try:
         min_value = float(raw_min)
     except (ValueError, TypeError):
-        logger.warning("Invalid ALERT_MIN_VALUE_EUR=%r — using 50000", raw_min)
-        min_value = 50_000.0
+        logger.warning("Invalid ALERT_MIN_VALUE_EUR=%r — using 10000", raw_min)
+        min_value = 10_000.0
 
     exclude_mechanical = raw_mech.strip().lower() not in ("0", "false", "no")
-
-    try:
-        max_age = int(raw_age)
-    except (ValueError, TypeError):
-        logger.warning("Invalid ALERT_MAX_FILING_AGE_DAYS=%r — using 5", raw_age)
-        max_age = 5
 
     return AlertConfig(
         min_value_eur=min_value,
         exclude_mechanical=exclude_mechanical,
-        max_filing_age_days=max_age,
     )
 
 
 def _parse_filed_date(filed_date: str) -> Optional[date]:
     """
     Parse filed_date from either YYYY-MM-DD or DD/MM/YYYY.
-    Returns None if unparseable (caller treats as age unknown → pass).
+    Returns None if unparseable.
     """
     for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
@@ -127,6 +128,22 @@ def _parse_filed_date(filed_date: str) -> Optional[date]:
         except (ValueError, TypeError):
             continue
     return None
+
+
+def _is_late_discovery(filed_date: str) -> bool:
+    """
+    Return True if the filing is older than _LATE_DISCOVERY_DAYS calendar days.
+
+    Used in live context only: a True result adds a [LATE] label to the alert
+    but never suppresses it.  Returns False when filed_date is unparseable
+    (unknown age → not labelled as late).
+    """
+    if not filed_date:
+        return False
+    filed = _parse_filed_date(filed_date)
+    if filed is None:
+        return False
+    return (datetime.utcnow().date() - filed).days > _LATE_DISCOVERY_DAYS
 
 
 def should_dispatch(
@@ -137,8 +154,12 @@ def should_dispatch(
     """
     Return (True, "") if the alert should fire, (False, reason) if suppressed.
 
-    urgent=True bypasses all quality filters.  Use this for high-priority
-    failure notifications that must reach the operator regardless of value or age.
+    Checks value threshold and mechanical-type exclusion.
+    urgent=True bypasses both filters — use for high-priority failure
+    notifications that must reach the operator regardless of value or type.
+
+    Filing age is NOT checked here; age-based behaviour is handled by context
+    (backfill → suppress all; live → label late but always send).
     """
     if urgent:
         return True, ""
@@ -153,17 +174,6 @@ def should_dispatch(
     # ── Mechanical-type exclusion ─────────────────────────────────────────────
     if config.exclude_mechanical and payload.transaction_type in MECHANICAL_TRANSACTION_TYPES:
         return False, f"mechanical_type ({payload.transaction_type})"
-
-    # ── Filing age ────────────────────────────────────────────────────────────
-    if config.max_filing_age_days > 0 and payload.filed_date:
-        filed = _parse_filed_date(payload.filed_date)
-        if filed is not None:
-            age_days = (datetime.utcnow().date() - filed).days
-            if age_days > config.max_filing_age_days:
-                return (
-                    False,
-                    f"filing_too_old ({age_days}d > {config.max_filing_age_days}d)",
-                )
 
     return True, ""
 
@@ -234,7 +244,11 @@ _TYPE_LABEL = {
 }
 
 
-def _build_email(payload: AlertPayload, cluster: Optional[dict]) -> dict:
+def _build_email(
+    payload: AlertPayload,
+    cluster: Optional[dict],
+    late_discovery: bool = False,
+) -> dict:
     """Return {"subject": str, "html": str, "text": str}."""
     dir_label  = _DIR_LABEL.get(payload.direction, payload.direction.upper())
     type_label = _TYPE_LABEL.get(payload.transaction_type, payload.transaction_type)
@@ -249,6 +263,9 @@ def _build_email(payload: AlertPayload, cluster: Optional[dict]) -> dict:
         bracket = "Buy" if payload.direction == "buy" else "Sell"
         subject = f"[{bracket}] {payload.company_name} — {payload.insider_name} {value_str}"
 
+    if late_discovery:
+        subject = f"[LATE] {subject}"
+
     rows = [
         ("Società",            payload.company_name),
         ("Insider",            payload.insider_name),
@@ -260,6 +277,13 @@ def _build_email(payload: AlertPayload, cluster: Optional[dict]) -> dict:
         ("Data operazione",    _fmt_date(payload.transaction_date)),
         ("Data comunicazione", _fmt_date(payload.filed_date) if payload.filed_date else "—"),
     ]
+    if late_discovery and payload.filed_date:
+        filed = _parse_filed_date(payload.filed_date)
+        age_label = f"{(datetime.utcnow().date() - filed).days}g fa" if filed else ""
+        rows.append((
+            "⏰ Tarda scoperta",
+            f"Pubblicata {age_label} · {_fmt_date(payload.filed_date)}".strip(" ·"),
+        ))
     if cluster and payload.direction == "buy":
         rows.append((
             "🔔 Cluster",
@@ -310,7 +334,11 @@ def _build_email(payload: AlertPayload, cluster: Optional[dict]) -> dict:
 
 # ─── Email sender ─────────────────────────────────────────────────────────────
 
-def send_email(payload: AlertPayload, cluster: Optional[dict]) -> bool:
+def send_email(
+    payload: AlertPayload,
+    cluster: Optional[dict],
+    late_discovery: bool = False,
+) -> bool:
     """Send alert via Resend API.  Returns True on success."""
     api_key   = os.getenv("RESEND_API_KEY", "")
     raw_to    = os.getenv("ALERT_EMAIL", "")
@@ -324,7 +352,7 @@ def send_email(payload: AlertPayload, cluster: Optional[dict]) -> bool:
         return False
 
     recipients = [r.strip() for r in raw_to.split(",") if r.strip()]
-    email = _build_email(payload, cluster)
+    email = _build_email(payload, cluster, late_discovery=late_discovery)
 
     try:
         resp = httpx.post(
@@ -359,26 +387,42 @@ def dispatch(
     client,
     company_tier: int,
     urgent: bool = False,
+    context: str = "live",
 ) -> None:
     """
     Fire all alert channels for a newly inserted transaction.
 
-    Hard gates (always enforced):
+    Hard gates (always enforced, even when urgent=True):
       · company_tier <= 2  (Tier 1 FTSE MIB or Tier 2 Mid Cap only)
       · direction in (buy, sell)
 
-    Quality filters (bypassed when urgent=True):
-      · total_value >= ALERT_MIN_VALUE_EUR  (default 50 000 EUR)
-      · transaction_type not in mechanical types  (default: exclude)
-      · filed_date within ALERT_MAX_FILING_AGE_DAYS  (default: 5 days)
+    Context gate (enforced before quality filters):
+      · context='backfill'  → suppress all transaction alerts and return.
+        Use when running reprocess_historical or a full-company initial sweep
+        so historical inserts do not flood alert channels.
+      · context='live' (default) → proceed normally.
 
-    Pass urgent=True for high-priority failure notifications where
-    value/age/type filters must not suppress the alert.
+    Quality filters (bypassed when urgent=True):
+      · total_value >= ALERT_MIN_VALUE_EUR  (default 10 000 EUR)
+      · transaction_type not in MECHANICAL_TRANSACTION_TYPES
+
+    Late-discovery labelling (live context only, never suppresses):
+      · Filings whose filed_date is > _LATE_DISCOVERY_DAYS old get a [LATE]
+        prefix in the subject and a note in the body.  The alert still fires.
     """
     # Hard gates — never bypassed
     if company_tier > 2:
         return
     if payload.direction not in ("buy", "sell"):
+        return
+
+    # Context gate — suppress all transaction alerts during intentional backfills
+    if context == "backfill":
+        logger.info(
+            "Alert suppressed (backfill context): %s %s €%s",
+            payload.company_name, payload.direction,
+            f"{payload.total_value:,.0f}",
+        )
         return
 
     # Quality filters — bypassed when urgent=True
@@ -392,13 +436,21 @@ def dispatch(
         )
         return
 
+    # Late-discovery labelling (label-only, never suppresses)
+    late = _is_late_discovery(payload.filed_date)
+    if late:
+        logger.info(
+            "Late discovery alert: %s — filed %s (>%dd ago)",
+            payload.company_name, payload.filed_date, _LATE_DISCOVERY_DAYS,
+        )
+
     cluster = None
     if payload.direction == "buy":
         cluster = check_cluster(client, payload.company_id, payload.transaction_date)
 
     # ── Email (active) ───────────────────────────────────────────────────────
-    send_email(payload, cluster)
+    send_email(payload, cluster, late_discovery=late)
 
     # ── Telegram ────────────────────────────────────────────────────────────
     from .telegram import send_telegram
-    send_telegram(payload, cluster)
+    send_telegram(payload, cluster, late_discovery=late)

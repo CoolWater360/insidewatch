@@ -104,9 +104,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           # Alert quality filters — override via GitHub repository variables if needed
-          ALERT_MIN_VALUE_EUR: "50000"
+          ALERT_MIN_VALUE_EUR: "10000"
           ALERT_EXCLUDE_MECHANICAL: "true"
-          ALERT_MAX_FILING_AGE_DAYS: "5"
+          # Live context: late discoveries get a [LATE] label but are not suppressed.
+          # Change to 'backfill' for intentional historical sweeps to silence alerts.
+          ALERT_CONTEXT: "live"
         run: python3 -m scraper.run_listener
 
   # ── Job 2: Full sweep ───────────────────────────────────────────────────────
@@ -167,9 +169,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           # Alert quality filters — override via GitHub repository variables if needed
-          ALERT_MIN_VALUE_EUR: "50000"
+          ALERT_MIN_VALUE_EUR: "10000"
           ALERT_EXCLUDE_MECHANICAL: "true"
-          ALERT_MAX_FILING_AGE_DAYS: "5"
+          # Set to 'backfill' when running an initial full-company sweep to silence
+          # historical alerts. Default 'live' for the regular daily catch-up.
+          ALERT_CONTEXT: "live"
         run: |
           python3 -m scraper.run_phase2 \
             --tier ${{ steps.flags.outputs.max_tier }} \
