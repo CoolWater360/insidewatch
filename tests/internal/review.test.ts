@@ -158,11 +158,19 @@ describe("getTransactionsForReview", () => {
     expect(selectArg).not.toContain("review_notes");
   });
 
-  it("returns empty result on PostgREST error (error path)", async () => {
-    setMock([], null, { message: "column transactions.nonexistent does not exist" });
+  it("exposes queryError on PostgREST error instead of silently returning empty", async () => {
+    const errMsg = "column transactions.review_notes does not exist";
+    setMock([], null, { message: errMsg });
     const result = await getTransactionsForReview(1, 25);
     expect(result.rows).toHaveLength(0);
     expect(result.total).toBe(0);
     expect(result.totalPages).toBe(0);
+    expect(result.queryError).toBe(errMsg);
+  });
+
+  it("queryError is undefined on success", async () => {
+    setMock([TX_ROW], 1, null);
+    const result = await getTransactionsForReview(1, 25);
+    expect(result.queryError).toBeUndefined();
   });
 });

@@ -59,6 +59,7 @@ export interface PaginatedResult<T> {
   page: number;
   pageSize: number;
   totalPages: number;
+  queryError?: string;
 }
 
 // ─── Queue counts ─────────────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ export async function getTransactionsForReview(
 
   if (error) {
     console.error("getTransactionsForReview error:", error.message);
-    return { rows: [], total: 0, page, pageSize, totalPages: 0 };
+    return { rows: [], total: 0, page, pageSize, totalPages: 0, queryError: error.message };
   }
 
   const total = count ?? 0;

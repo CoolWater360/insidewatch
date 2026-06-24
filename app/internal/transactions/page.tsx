@@ -19,7 +19,14 @@ export default async function TransactionReviewPage({ searchParams }: Props) {
         <span className="text-sm text-muted">{result.total} pending</span>
       </div>
 
-      {result.rows.length === 0 ? (
+      {result.queryError ? (
+        <div className="rounded-lg border border-red-500/30 bg-red-900/20 p-6">
+          <p className="text-sm font-medium text-red-400">
+            Database query failed — review queue could not be loaded.
+          </p>
+          <p className="mt-1 font-mono text-xs text-red-300/70">{result.queryError}</p>
+        </div>
+      ) : result.rows.length === 0 ? (
         <div className="rounded-lg border border-white/10 bg-navy-900/50 p-8 text-center text-muted">
           No transactions pending review.
         </div>
