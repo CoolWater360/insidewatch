@@ -103,6 +103,10 @@ jobs:
           ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          # Alert quality filters — override via GitHub repository variables if needed
+          ALERT_MIN_VALUE_EUR: "50000"
+          ALERT_EXCLUDE_MECHANICAL: "true"
+          ALERT_MAX_FILING_AGE_DAYS: "5"
         run: python3 -m scraper.run_listener
 
   # ── Job 2: Full sweep ───────────────────────────────────────────────────────
@@ -162,6 +166,10 @@ jobs:
           ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          # Alert quality filters — override via GitHub repository variables if needed
+          ALERT_MIN_VALUE_EUR: "50000"
+          ALERT_EXCLUDE_MECHANICAL: "true"
+          ALERT_MAX_FILING_AGE_DAYS: "5"
         run: |
           python3 -m scraper.run_phase2 \
             --tier ${{ steps.flags.outputs.max_tier }} \

@@ -2,8 +2,7 @@
 Alert dispatcher for InsideWatch.
 
 Single entry point: dispatch(payload, client, company_tier)
-Currently sends email via Resend.  Telegram seam is stubbed — add it
-by uncommenting the import and call at the bottom of dispatch().
+Currently sends email via Resend.  Telegram seam is active.
 
 Required env vars:
   RESEND_API_KEY       — Resend secret key
@@ -11,19 +10,43 @@ Required env vars:
   ALERT_FROM_EMAIL     — verified sender (e.g. "InsideWatch <alerts@yourdomain.com>")
   TELEGRAM_BOT_TOKEN   — Telegram bot token from @BotFather
   TELEGRAM_CHANNEL_ID  — Channel username or numeric chat ID
+
+Alert quality filters (all configurable via env vars):
+  ALERT_MIN_VALUE_EUR        — suppress alerts below this total value (default: 50000)
+  ALERT_EXCLUDE_MECHANICAL   — skip non-discretionary event types (default: true)
+  ALERT_MAX_FILING_AGE_DAYS  — suppress alerts for old filings (default: 5; 0 = disabled)
+
+Pass urgent=True to dispatch() to bypass all quality filters (e.g. for
+high-priority review-failure notifications).
 """
 
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 RESEND_API = "https://api.resend.com/emails"
+
+# Transaction types that represent mechanical / non-discretionary events.
+# Updated in sync with classifier.py's mechanical taxonomy.
+MECHANICAL_TRANSACTION_TYPES: frozenset = frozenset({
+    "grant",
+    "option_exercise",
+    "sell_to_cover",
+    "conversion",
+    "inheritance",
+    "gift_in",
+    "gift_out",
+    "transfer_in",
+    "transfer_out",
+    "pledge_or_security",
+    "derivative_transaction",
+})
 
 
 # ─── Payload ──────────────────────────────────────────────────────────────────
@@ -41,9 +64,108 @@ class AlertPayload:
     total_value: float
     currency: str
     transaction_date: str   # YYYY-MM-DD
-    filed_date: str
+    filed_date: str         # DD/MM/YYYY (Italian listing page format) or YYYY-MM-DD
     source_url: str
     transaction_id: int
+
+
+# ─── Alert quality filter ─────────────────────────────────────────────────────
+
+@dataclass
+class AlertConfig:
+    """Quality thresholds for alert suppression. Loaded from environment."""
+    # Minimum total transaction value (in reporting currency) to fire an alert.
+    # Transactions below this threshold are suppressed as noise.
+    # Default: 50 000 — the MAR Art.19 single-transaction reporting threshold.
+    min_value_eur: float = 50_000.0
+
+    # When True, mechanical/non-discretionary event types (grants, exercises,
+    # transfers, conversions) are suppressed. These are not trading signals.
+    exclude_mechanical: bool = True
+
+    # Suppress alerts for filings older than this many calendar days.
+    # Protects against alert floods during initial backfills and sweep runs.
+    # 0 = disabled (all ages pass). Default: 5 (> MAR 3-business-day deadline).
+    max_filing_age_days: int = 5
+
+
+def _load_alert_config() -> AlertConfig:
+    """Read AlertConfig from environment variables."""
+    raw_min = os.getenv("ALERT_MIN_VALUE_EUR", "50000")
+    raw_mech = os.getenv("ALERT_EXCLUDE_MECHANICAL", "true")
+    raw_age = os.getenv("ALERT_MAX_FILING_AGE_DAYS", "5")
+
+    try:
+        min_value = float(raw_min)
+    except (ValueError, TypeError):
+        logger.warning("Invalid ALERT_MIN_VALUE_EUR=%r — using 50000", raw_min)
+        min_value = 50_000.0
+
+    exclude_mechanical = raw_mech.strip().lower() not in ("0", "false", "no")
+
+    try:
+        max_age = int(raw_age)
+    except (ValueError, TypeError):
+        logger.warning("Invalid ALERT_MAX_FILING_AGE_DAYS=%r — using 5", raw_age)
+        max_age = 5
+
+    return AlertConfig(
+        min_value_eur=min_value,
+        exclude_mechanical=exclude_mechanical,
+        max_filing_age_days=max_age,
+    )
+
+
+def _parse_filed_date(filed_date: str) -> Optional[date]:
+    """
+    Parse filed_date from either YYYY-MM-DD or DD/MM/YYYY.
+    Returns None if unparseable (caller treats as age unknown → pass).
+    """
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(filed_date[:10], fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def should_dispatch(
+    payload: AlertPayload,
+    config: AlertConfig,
+    urgent: bool = False,
+) -> Tuple[bool, str]:
+    """
+    Return (True, "") if the alert should fire, (False, reason) if suppressed.
+
+    urgent=True bypasses all quality filters.  Use this for high-priority
+    failure notifications that must reach the operator regardless of value or age.
+    """
+    if urgent:
+        return True, ""
+
+    # ── Value threshold ───────────────────────────────────────────────────────
+    if config.min_value_eur > 0 and payload.total_value < config.min_value_eur:
+        return (
+            False,
+            f"below_min_value (€{payload.total_value:,.0f} < €{config.min_value_eur:,.0f})",
+        )
+
+    # ── Mechanical-type exclusion ─────────────────────────────────────────────
+    if config.exclude_mechanical and payload.transaction_type in MECHANICAL_TRANSACTION_TYPES:
+        return False, f"mechanical_type ({payload.transaction_type})"
+
+    # ── Filing age ────────────────────────────────────────────────────────────
+    if config.max_filing_age_days > 0 and payload.filed_date:
+        filed = _parse_filed_date(payload.filed_date)
+        if filed is not None:
+            age_days = (datetime.utcnow().date() - filed).days
+            if age_days > config.max_filing_age_days:
+                return (
+                    False,
+                    f"filing_too_old ({age_days}d > {config.max_filing_age_days}d)",
+                )
+
+    return True, ""
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -56,7 +178,7 @@ def _fmt_value(v: float, currency: str = "EUR") -> str:
 
 
 def _fmt_date(iso: str) -> str:
-    """YYYY-MM-DD → GG/MM/AAAA"""
+    """YYYY-MM-DD → GG/MM/AAAA (pass-through if already DD/MM/YYYY)."""
     try:
         return datetime.strptime(iso[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
     except Exception:
@@ -232,18 +354,42 @@ def send_email(payload: AlertPayload, cluster: Optional[dict]) -> bool:
 
 # ─── Central dispatcher ───────────────────────────────────────────────────────
 
-def dispatch(payload: AlertPayload, client, company_tier: int) -> None:
+def dispatch(
+    payload: AlertPayload,
+    client,
+    company_tier: int,
+    urgent: bool = False,
+) -> None:
     """
     Fire all alert channels for a newly inserted transaction.
 
-    Conditions checked here (caller should pre-filter insider_verified and
-    needs_review, but we enforce tier and direction):
+    Hard gates (always enforced):
       · company_tier <= 2  (Tier 1 FTSE MIB or Tier 2 Mid Cap only)
-      · direction in (buy, sell)  — grants/unknown are skipped
+      · direction in (buy, sell)
+
+    Quality filters (bypassed when urgent=True):
+      · total_value >= ALERT_MIN_VALUE_EUR  (default 50 000 EUR)
+      · transaction_type not in mechanical types  (default: exclude)
+      · filed_date within ALERT_MAX_FILING_AGE_DAYS  (default: 5 days)
+
+    Pass urgent=True for high-priority failure notifications where
+    value/age/type filters must not suppress the alert.
     """
+    # Hard gates — never bypassed
     if company_tier > 2:
         return
     if payload.direction not in ("buy", "sell"):
+        return
+
+    # Quality filters — bypassed when urgent=True
+    config = _load_alert_config()
+    ok, reason = should_dispatch(payload, config, urgent=urgent)
+    if not ok:
+        logger.info(
+            "Alert suppressed [%s]: %s %s €%s",
+            reason, payload.company_name, payload.direction,
+            f"{payload.total_value:,.0f}",
+        )
         return
 
     cluster = None
