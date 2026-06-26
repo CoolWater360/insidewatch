@@ -598,3 +598,166 @@ class TestDisplayNameExtraction:
         }
         assert _company_name(row) == "Correct SpA"
         assert _insider_name(row) == "Correct Name"
+
+
+# ─── --show command: format_show_output tests ────────────────────────────────
+
+class TestFormatShowOutput:
+    """
+    Unit tests for format_show_output() — pure function, no DB access.
+
+    Uses a representative transaction dict matching the PostgREST shape
+    returned by _SHOW_TX_SELECT.
+    """
+
+    def _import(self):
+        from scraper.sample_review_queue import format_show_output
+        return format_show_output
+
+    def _full_tx(self) -> dict:
+        return {
+            "id": 9001,
+            "direction": "buy",
+            "transaction_type": "open_market_purchase",
+            "economic_intent": "discretionary",
+            "transaction_date": "2026-05-14",
+            "quantity": 5000,
+            "unit_price": 3.42,
+            "total_value": 17100.0,
+            "currency": "EUR",
+            "isin": "IT0001234567",
+            "extraction_confidence": 0.91,
+            "classification_confidence": 0.87,
+            "classification_rationale": "buy_keyword: ACQUISTO found in section 4a",
+            "review_reason": None,
+            "needs_review": False,
+            "raw_nature_text": "Acquisto di azioni ordinarie sul mercato regolamentato.",
+            "source_url": "https://example.com/filing.pdf",
+            "source_filing_id": 42,
+            "parser_version": "v3",
+            "companies": {"name": "Acme SpA"},
+            "insiders":  {"full_name": "Mario Rossi", "role": "Director"},
+            "filings":   {
+                "pdf_url": "https://example.com/filing.pdf",
+                "filing_date": "2026-05-15",
+                "raw_extracted_text": "some text",
+            },
+        }
+
+    def test_contains_transaction_id(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "9001" in out
+
+    def test_contains_company_name(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "Acme SpA" in out
+
+    def test_contains_insider_and_role(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "Mario Rossi" in out
+        assert "Director" in out
+
+    def test_contains_transaction_date(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "2026-05-14" in out
+
+    def test_contains_quantity_price_total(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "5000" in out
+        assert "3.42" in out
+        assert "17100" in out
+
+    def test_contains_direction_type_intent(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "buy" in out
+        assert "open_market_purchase" in out
+        assert "discretionary" in out
+
+    def test_contains_confidence_values(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "0.910" in out
+        assert "0.870" in out
+
+    def test_contains_classification_rationale(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "buy_keyword: ACQUISTO found in section 4a" in out
+
+    def test_contains_raw_nature_text(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "Acquisto di azioni ordinarie" in out
+
+    def test_contains_isin(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "IT0001234567" in out
+
+    def test_contains_filing_pdf_url(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "https://example.com/filing.pdf" in out
+
+    def test_contains_filing_date(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "2026-05-15" in out
+
+    def test_contains_parser_version(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "v3" in out
+
+    def test_has_text_yes_when_text_present(self):
+        fmt = self._import()
+        out = fmt(self._full_tx())
+        assert "yes" in out
+
+    def test_has_text_no_when_text_absent(self):
+        fmt = self._import()
+        tx = self._full_tx()
+        tx["filings"]["raw_extracted_text"] = None
+        out = fmt(tx)
+        assert "no" in out
+
+    def test_none_filings_does_not_crash(self):
+        fmt = self._import()
+        tx = self._full_tx()
+        tx["filings"] = None
+        out = fmt(tx)
+        assert "9001" in out
+        assert "no" in out  # has_text must be false when filings is None
+
+    def test_missing_optional_fields_show_dash(self):
+        fmt = self._import()
+        tx = {
+            "id": 1,
+            "companies": None,
+            "insiders":  None,
+            "filings":   None,
+        }
+        out = fmt(tx)
+        assert "—" in out
+
+    def test_long_raw_nature_text_is_wrapped(self):
+        """Lines in the raw_nature_text block must not exceed ~80 chars."""
+        fmt = self._import()
+        tx = self._full_tx()
+        tx["raw_nature_text"] = "A" * 200
+        out = fmt(tx)
+        for line in out.splitlines():
+            assert len(line) <= 80, f"Line too wide ({len(line)}): {line!r}"
+
+    def test_show_select_uses_filings_embedded_resource(self):
+        """_SHOW_TX_SELECT must reference the filings relation, not a flat column."""
+        from scraper.sample_review_queue import _SHOW_TX_SELECT
+        assert "filings(" in _SHOW_TX_SELECT
+        assert "companies(" in _SHOW_TX_SELECT
+        assert "insiders(" in _SHOW_TX_SELECT

@@ -36,6 +36,9 @@ Usage
       --corrected-direction buy --corrected-type buy \\
       --notes "ACQUISTO keyword present in section 4a, missed by parser"
 
+  # Inspect a single transaction in full (read-only, no state change)
+  python3 -m scraper.sample_review_queue --show TX_ID
+
   # Mark a quality_review record as eligible for a regression fixture
   python3 -m scraper.sample_review_queue --mark-fixture REVIEW_ID
 """
@@ -331,6 +334,105 @@ def _cmd_record(
     }).eq("id", tx_id).execute()
 
 
+_SHOW_TX_SELECT = (
+    "id,direction,transaction_type,economic_intent,"
+    "transaction_date,quantity,unit_price,total_value,currency,isin,"
+    "extraction_confidence,classification_confidence,"
+    "classification_rationale,review_reason,needs_review,raw_nature_text,"
+    "source_url,source_filing_id,parser_version,"
+    "companies(name),insiders(full_name,role),"
+    "filings(pdf_url,filing_date,raw_extracted_text)"
+)
+
+
+def format_show_output(tx: dict) -> str:
+    """
+    Format a single transaction dict (as returned by the PostgREST
+    embedded-resource query using _SHOW_TX_SELECT) into a human-readable
+    diagnostic string.
+
+    Pure function — no I/O, no DB access.  Can be tested without Supabase.
+    """
+    def _v(val, fallback: str = "—") -> str:
+        if val is None or val == "":
+            return fallback
+        return str(val)
+
+    def _conf(val) -> str:
+        if val is None:
+            return "—"
+        return f"{val:.3f}"
+
+    co   = (tx.get("companies") or {})
+    ins  = (tx.get("insiders")  or {})
+    fil  = (tx.get("filings")   or {})
+
+    has_text = bool(fil.get("raw_extracted_text"))
+
+    lines = [
+        "",
+        f"Transaction #{tx['id']}",
+        "─" * 60,
+        f"  Issuer / company  : {_v(co.get('name'))}",
+        f"  Insider           : {_v(ins.get('full_name'))}",
+        f"  Role              : {_v(ins.get('role'))}",
+        "",
+        f"  Transaction date  : {_v(tx.get('transaction_date'))}",
+        f"  Quantity          : {_v(tx.get('quantity'))}",
+        f"  Unit price        : {_v(tx.get('unit_price'))}",
+        f"  Total value       : {_v(tx.get('total_value'))}",
+        f"  Currency          : {_v(tx.get('currency'))}",
+        f"  ISIN              : {_v(tx.get('isin'))}",
+        "",
+        f"  Direction         : {_v(tx.get('direction'))}",
+        f"  Transaction type  : {_v(tx.get('transaction_type'))}",
+        f"  Economic intent   : {_v(tx.get('economic_intent'))}",
+        "",
+        f"  Extraction conf.  : {_conf(tx.get('extraction_confidence'))}",
+        f"  Classif. conf.    : {_conf(tx.get('classification_confidence'))}",
+        f"  Needs review      : {_v(tx.get('needs_review'))}",
+        "",
+        f"  Classif. rationale: {_v(tx.get('classification_rationale'))}",
+        f"  Review reason     : {_v(tx.get('review_reason'))}",
+        "",
+        "  Raw nature text:",
+    ]
+
+    raw_nature = tx.get("raw_nature_text") or ""
+    if raw_nature:
+        for chunk in [raw_nature[i:i+72] for i in range(0, len(raw_nature), 72)]:
+            lines.append(f"    {chunk}")
+    else:
+        lines.append("    —")
+
+    lines += [
+        "",
+        f"  Source filing ID  : {_v(tx.get('source_filing_id'))}",
+        f"  Source URL (tx)   : {_v(tx.get('source_url'))}",
+        f"  Filing PDF URL    : {_v(fil.get('pdf_url'))}",
+        f"  Filing date       : {_v(fil.get('filing_date'))}",
+        f"  Parser version    : {_v(tx.get('parser_version'))}",
+        f"  Filing has text   : {'yes' if has_text else 'no'}",
+        "",
+    ]
+
+    return "\n".join(lines)
+
+
+def _cmd_show(client, tx_id: int) -> None:
+    result = (
+        client.table("transactions")
+        .select(_SHOW_TX_SELECT)
+        .eq("id", tx_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        print(f"ERROR: transaction {tx_id} not found.", file=sys.stderr)
+        sys.exit(1)
+    print(format_show_output(result.data[0]))
+
+
 def _cmd_mark_fixture(client, review_id: int) -> None:
     result = client.table("quality_reviews").update({
         "fixture_eligible": True,
@@ -370,13 +472,19 @@ def main(argv=None) -> int:
     parser.add_argument("--reviewed-by", default="operator",
                         help="Reviewer identifier (default: operator)")
 
+    parser.add_argument("--show", type=int, metavar="TX_ID",
+                        help="Print full diagnostic detail for a single transaction (read-only)")
+
     parser.add_argument("--mark-fixture", type=int, metavar="REVIEW_ID",
                         help="Mark a quality_review record as fixture_eligible=True")
 
     args = parser.parse_args(argv)
     client = _get_client()
 
-    if args.mark_fixture is not None:
+    if args.show is not None:
+        _cmd_show(client, args.show)
+
+    elif args.mark_fixture is not None:
         _cmd_mark_fixture(client, args.mark_fixture)
 
     elif args.record is not None:
