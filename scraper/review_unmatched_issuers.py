@@ -1,8 +1,12 @@
 """
-Unmatched issuer review workflow — Phase 6.
+Unmatched issuer review workflow — Phase 6 / Phase 13.
 
 Lists pending entries from unmatched_issuers and allows operators to resolve
 or reject each one via a simple CLI.
+
+Phase 13 adds false-match tracking: when a previously resolved entry turns out
+to have been linked to the wrong issuer, --flag-false-match records the wrong
+issuer separately so it is not re-suggested and the entry can be re-resolved.
 
 Usage:
     # List all pending entries
@@ -17,6 +21,9 @@ Usage:
 
     # Reject entry #5 (parse error, test data, etc.)
     python3 -m scraper.review_unmatched_issuers --reject 5
+
+    # Flag entry #5 as a false match to issuer 12 (was incorrectly linked)
+    python3 -m scraper.review_unmatched_issuers --flag-false-match 5 --was 12
 
     # List resolved / rejected entries
     python3 -m scraper.review_unmatched_issuers --status resolved
@@ -135,6 +142,42 @@ def _cmd_reject(client, unmatched_id: int) -> None:
     print(f"Rejected unmatched #{unmatched_id}")
 
 
+def _cmd_flag_false_match(
+    client,
+    unmatched_id: int,
+    wrong_issuer_id: int,
+    flagged_by: str = "operator",
+) -> None:
+    """
+    Record that the given issuer was incorrectly linked to this entry.
+
+    Sets false_match_issuer_id so the resolver does not re-suggest the same
+    wrong issuer.  Does not change status or resolved_to — use --resolve or
+    --create-and-resolve to set the correct issuer separately.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+
+    result = (
+        client.table("unmatched_issuers")
+        .update({
+            "false_match_issuer_id": wrong_issuer_id,
+            "false_match_flagged_at": now,
+            "false_match_flagged_by": flagged_by,
+        })
+        .eq("id", unmatched_id)
+        .execute()
+    )
+    if result.data:
+        print(
+            f"Flagged unmatched #{unmatched_id}: issuer {wrong_issuer_id} "
+            f"is a false match (flagged by {flagged_by})"
+        )
+        print("Run --resolve to link this entry to the correct issuer.")
+    else:
+        print(f"WARNING: unmatched #{unmatched_id} not found.", file=sys.stderr)
+
+
 def _backfill_company_link(client, raw_name: str, issuer_id: int) -> None:
     """Link existing companies rows with this name to the resolved issuer."""
     from .issuer_resolver import link_company_to_issuer
@@ -177,6 +220,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--reject", type=int, metavar="ID",
                         help="Reject unmatched entry ID")
 
+    parser.add_argument("--flag-false-match", type=int, metavar="ID",
+                        help="Flag unmatched entry ID as a false match")
+    parser.add_argument("--was", type=int, metavar="ISSUER_ID",
+                        help="Issuer ID that was incorrectly linked (used with --flag-false-match)")
+    parser.add_argument("--flagged-by", default="operator",
+                        help="Who is flagging the false match (default: operator)")
+
     args = parser.parse_args(argv)
     client = _get_client()
 
@@ -203,6 +253,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elif args.reject is not None:
         _cmd_reject(client, args.reject)
+
+    elif args.flag_false_match is not None:
+        if args.was is None:
+            print("ERROR: --flag-false-match requires --was <issuer_id>", file=sys.stderr)
+            return 2
+        _cmd_flag_false_match(client, args.flag_false_match, args.was, args.flagged_by)
 
     else:
         _cmd_list(client, args.status)

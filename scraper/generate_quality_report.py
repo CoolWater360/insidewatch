@@ -37,7 +37,7 @@ def _fetch_quality_rows(client, since: Optional[str]) -> List[dict]:
             "id,insider_name,company_name,isin,direction,transaction_type,"
             "transaction_date,extraction_confidence,classification_confidence,"
             "needs_review,review_status,review_reason,parse_warnings,"
-            "parser_version,created_at,is_current"
+            "parser_version,created_at,is_current,classification_rationale"
         )
         .eq("is_current", True)
         .order("created_at", desc=True)
@@ -120,6 +120,26 @@ def _print_report(rows: List[dict], since: Optional[str]) -> None:
         dir_counts[d] = dir_counts.get(d, 0) + 1
     for d, n in sorted(dir_counts.items(), key=lambda x: -x[1]):
         print(f"  {d:<10} {n:>5}  ({n * 100 // total}%)")
+
+    # Unknown-direction root-cause breakdown
+    unknown_rows = [r for r in rows if (r.get("direction") or "unknown") == "unknown"]
+    if unknown_rows:
+        print(f"\nUnknown-direction root causes  ({len(unknown_rows)} transactions):")
+        cause_counts: dict[str, int] = {}
+        for r in unknown_rows:
+            rationale = r.get("classification_rationale") or "no_rationale_stored"
+            # Use the part before the first colon as the root-cause label
+            prefix = rationale.split(":")[0].strip()
+            cause_counts[prefix] = cause_counts.get(prefix, 0) + 1
+        for cause, n in sorted(cause_counts.items(), key=lambda x: -x[1]):
+            pct = n * 100 // len(unknown_rows)
+            print(f"  {cause:<48}  {n:>4}  ({pct}%)")
+        print(
+            "  Note: 'undetermined' means no direction keyword or nature-text signal\n"
+            "  was found.  'vague_direction' means direction was inferred from a\n"
+            "  weak/fallback signal and downgraded.  Neither should be 'fixed' by\n"
+            "  guessing — both represent genuine parsing uncertainty."
+        )
 
     # Transaction type breakdown
     print(f"\nTransaction type breakdown:")
