@@ -1,3 +1,4 @@
+import { unstable_noStore as noStore } from "next/cache";
 import { getSupabase } from "./supabase";
 import { Company, Direction, TransactionWithRelations } from "./types";
 
@@ -231,6 +232,12 @@ const NON_CASH_TYPES = new Set(["grant", "option_exercise"]);
  * the distinct-insider count.
  */
 export async function getClusterSignals(lookbackDays = 90): Promise<ClusterSignal[]> {
+  // Explicitly opt out of Next.js Data Cache so signals always reflect the
+  // latest ingested transactions, regardless of the calling route segment's
+  // fetchCache settings.  Without this, the Supabase fetch may be served from
+  // a stale cache entry even when the page uses force-dynamic.
+  noStore();
+
   const supabase = getSupabase();
   if (!supabase) return [];
 
