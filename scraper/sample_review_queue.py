@@ -78,12 +78,27 @@ _CATEGORY_DESCRIPTIONS = {
     "other":             "needs_review=true, not covered by the above categories",
 }
 
+# PostgREST embedded-resource syntax: companies(name) and insiders(full_name)
+# join the FK columns company_id → companies.name and insider_id → insiders.full_name.
+# Do NOT reference company_name or insider_name — those columns do not exist on
+# the transactions table; the denormalized names live in the related tables.
 _TX_SELECT = (
-    "id,company_name,insider_name,direction,transaction_type,transaction_date,"
+    "id,direction,transaction_type,transaction_date,total_value,"
     "extraction_confidence,classification_confidence,classification_rationale,"
     "review_reason,needs_review,source_filing_id,parser_version,"
-    "economic_intent,raw_nature_text"
+    "economic_intent,raw_nature_text,"
+    "companies(name),insiders(full_name,role)"
 )
+
+
+def _company_name(row: dict) -> str:
+    """Extract company display name from a PostgREST embedded-resource row."""
+    return (row.get("companies") or {}).get("name") or ""
+
+
+def _insider_name(row: dict) -> str:
+    """Extract insider display name from a PostgREST embedded-resource row."""
+    return (row.get("insiders") or {}).get("full_name") or ""
 
 
 def _get_client():
@@ -219,8 +234,8 @@ def _cmd_list(client, category: str, limit: int) -> None:
     for r in rows:
         rationale = (r.get("classification_rationale") or "")[:38]
         print(
-            f"  {r['id']:>7}  {(r.get('company_name') or '')[:26]:<28}  "
-            f"{(r.get('insider_name') or '')[:20]:<22}  "
+            f"  {r['id']:>7}  {_company_name(r)[:26]:<28}  "
+            f"{_insider_name(r)[:20]:<22}  "
             f"{(r.get('direction') or ''):<6}  "
             f"{(r.get('transaction_type') or ''):<20}  "
             f"{(r.get('extraction_confidence') or 0):.2f}  "

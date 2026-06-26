@@ -437,3 +437,164 @@ class TestBuildFixture:
         fixture = build_fixture(review, tx, "text", None, "fixture_count")
         assert fixture["expected"]["count"] == 1
         assert len(fixture["expected"]["transactions"]) == 1
+
+
+# ─── Schema-column regression tests ──────────────────────────────────────────
+# These tests would have caught the Phase 13 bug where sample_review_queue.py
+# and generate_quality_report.py selected `company_name` and `insider_name`
+# directly from the `transactions` table — columns that do not exist there.
+# Names are stored in the related `companies.name` and `insiders.full_name`
+# columns and must be accessed via PostgREST embedded-resource syntax.
+
+import pathlib
+import re as _re
+
+_SCRAPER_DIR = pathlib.Path(__file__).parent.parent / "scraper"
+
+
+class TestTransactionSelectColumns:
+    """
+    Source-level regression tests that verify select strings targeting the
+    transactions table never reference non-existent flat columns.
+    """
+
+    # Columns that exist directly on the transactions table (subset sufficient
+    # for these checks — exhaustive enumeration is not required).
+    _VALID_TX_COLUMNS = {
+        "id", "insider_id", "company_id", "transaction_date", "filed_date",
+        "direction", "transaction_type", "economic_intent", "instrument_type",
+        "isin", "quantity", "unit_price", "total_value", "currency",
+        "source_url", "raw_document_sha256", "source_transaction_index",
+        "source_filing_id", "raw_hash", "needs_review", "extraction_confidence",
+        "classification_confidence", "review_status", "review_reason",
+        "parser_version", "created_at", "updated_at",
+        # Migration-added columns
+        "is_current", "version_number", "superseded_by", "superseded_at",
+        "identity_hash",
+        "classification_rationale", "raw_nature_text",
+        "classification_override", "classification_overridden_by",
+        "classification_overridden_at",
+        "review_notes",
+        # Latency / timestamp columns (migration 010)
+        "source_published_utc", "discovered_utc", "downloaded_utc",
+        "stored_utc", "parsed_utc", "delivered_utc",
+    }
+
+    # Columns that used to be (incorrectly) referenced but live in related tables.
+    _INVALID_FLAT_COLUMNS = {"company_name", "insider_name"}
+
+    def _read_src(self, filename: str) -> str:
+        return (_SCRAPER_DIR / filename).read_text()
+
+    def _extract_tx_select_strings(self, src: str) -> list[str]:
+        """
+        Return the quoted contents of every .select("...") call that appears
+        within a .table("transactions") chain (conservative heuristic).
+        """
+        # Grab everything between table("transactions") and the next .execute()
+        # or end of statement, then find .select("...") within that span.
+        tx_blocks = _re.findall(
+            r'\.table\("transactions"\).*?\.execute\(\)',
+            src,
+            flags=_re.DOTALL,
+        )
+        select_args = []
+        for block in tx_blocks:
+            for m in _re.finditer(r'\.select\(\s*"([^"]+)"', block):
+                select_args.append(m.group(1))
+        return select_args
+
+    def test_sample_review_queue_no_flat_company_insider_columns(self):
+        src = self._read_src("sample_review_queue.py")
+        selects = self._extract_tx_select_strings(src)
+        # Must have at least one select on transactions
+        assert selects, "No .table('transactions').select() found in sample_review_queue.py"
+        for sel in selects:
+            cols = {c.strip().split("(")[0] for c in sel.split(",")}
+            bad = cols & self._INVALID_FLAT_COLUMNS
+            assert not bad, (
+                f"sample_review_queue.py selects non-existent transaction column(s) {bad!r}. "
+                "Use PostgREST embedded-resource syntax: companies(name), insiders(full_name)."
+            )
+
+    def test_generate_quality_report_no_flat_company_insider_columns(self):
+        src = self._read_src("generate_quality_report.py")
+        selects = self._extract_tx_select_strings(src)
+        assert selects, "No .table('transactions').select() found in generate_quality_report.py"
+        for sel in selects:
+            cols = {c.strip().split("(")[0] for c in sel.split(",")}
+            bad = cols & self._INVALID_FLAT_COLUMNS
+            assert not bad, (
+                f"generate_quality_report.py selects non-existent transaction column(s) {bad!r}. "
+                "Use PostgREST embedded-resource syntax: companies(name), insiders(full_name)."
+            )
+
+    def test_sample_review_queue_uses_embedded_resource_syntax(self):
+        """Verify the correct PostgREST join syntax is present."""
+        src = self._read_src("sample_review_queue.py")
+        assert "companies(name)" in src, (
+            "sample_review_queue.py must use 'companies(name)' embedded-resource syntax"
+        )
+        assert "insiders(full_name" in src, (
+            "sample_review_queue.py must use 'insiders(full_name...)' embedded-resource syntax"
+        )
+
+    def test_generate_quality_report_uses_embedded_resource_syntax(self):
+        src = self._read_src("generate_quality_report.py")
+        assert "companies(name)" in src, (
+            "generate_quality_report.py must use 'companies(name)' embedded-resource syntax"
+        )
+        assert "insiders(full_name" in src, (
+            "generate_quality_report.py must use 'insiders(full_name...)' embedded-resource syntax"
+        )
+
+
+class TestDisplayNameExtraction:
+    """
+    Unit tests for the _company_name / _insider_name helper functions in
+    sample_review_queue.py.  These helpers extract display names from the
+    nested dict that PostgREST returns for embedded resources.
+    """
+
+    def _helpers(self):
+        from scraper.sample_review_queue import _company_name, _insider_name
+        return _company_name, _insider_name
+
+    def test_normal_nested_structure(self):
+        _company_name, _insider_name = self._helpers()
+        row = {
+            "companies": {"name": "Acme SpA"},
+            "insiders":  {"full_name": "Mario Rossi", "role": "Director"},
+        }
+        assert _company_name(row) == "Acme SpA"
+        assert _insider_name(row) == "Mario Rossi"
+
+    def test_none_nested_objects_return_empty_string(self):
+        _company_name, _insider_name = self._helpers()
+        row = {"companies": None, "insiders": None}
+        assert _company_name(row) == ""
+        assert _insider_name(row) == ""
+
+    def test_missing_nested_keys_return_empty_string(self):
+        _company_name, _insider_name = self._helpers()
+        row = {}
+        assert _company_name(row) == ""
+        assert _insider_name(row) == ""
+
+    def test_empty_name_value_returns_empty_string(self):
+        _company_name, _insider_name = self._helpers()
+        row = {"companies": {"name": None}, "insiders": {"full_name": ""}}
+        assert _company_name(row) == ""
+        assert _insider_name(row) == ""
+
+    def test_does_not_access_flat_company_name_key(self):
+        """Flat 'company_name' key on the row must be ignored."""
+        _company_name, _insider_name = self._helpers()
+        row = {
+            "company_name": "WRONG — flat column",
+            "insider_name": "WRONG — flat column",
+            "companies": {"name": "Correct SpA"},
+            "insiders":  {"full_name": "Correct Name"},
+        }
+        assert _company_name(row) == "Correct SpA"
+        assert _insider_name(row) == "Correct Name"

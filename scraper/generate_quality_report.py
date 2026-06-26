@@ -31,13 +31,19 @@ def _get_client():
 
 
 def _fetch_quality_rows(client, since: Optional[str]) -> List[dict]:
+    # Use PostgREST embedded-resource syntax for FK-joined names:
+    # companies(name) → row["companies"]["name"]
+    # insiders(full_name) → row["insiders"]["full_name"]
+    # Do NOT select company_name/insider_name — those columns do not exist on
+    # the transactions table; names are stored in the related tables.
     q = (
         client.table("transactions")
         .select(
-            "id,insider_name,company_name,isin,direction,transaction_type,"
+            "id,isin,direction,transaction_type,"
             "transaction_date,extraction_confidence,classification_confidence,"
             "needs_review,review_status,review_reason,parse_warnings,"
-            "parser_version,created_at,is_current,classification_rationale"
+            "parser_version,created_at,is_current,classification_rationale,"
+            "companies(name),insiders(full_name)"
         )
         .eq("is_current", True)
         .order("created_at", desc=True)
@@ -89,10 +95,16 @@ def _print_report(rows: List[dict], since: Optional[str]) -> None:
     print(f"\n  Avg extraction confidence:      {avg_ext:.3f}")
     print(f"  Avg classification confidence:  {avg_cls:.3f}")
 
-    # Missing key fields
-    missing_isin = sum(1 for r in rows if not r.get("isin"))
-    missing_name = sum(1 for r in rows if not r.get("insider_name") or r["insider_name"] == "Unknown")
-    missing_company = sum(1 for r in rows if not r.get("company_name") or r["company_name"] == "Unknown")
+    # Missing key fields — names come from FK-joined tables
+    def _ins_name(r: dict) -> str:
+        return (r.get("insiders") or {}).get("full_name") or ""
+
+    def _co_name(r: dict) -> str:
+        return (r.get("companies") or {}).get("name") or ""
+
+    missing_isin    = sum(1 for r in rows if not r.get("isin"))
+    missing_name    = sum(1 for r in rows if not _ins_name(r) or _ins_name(r) == "Unknown")
+    missing_company = sum(1 for r in rows if not _co_name(r) or _co_name(r) == "Unknown")
     print(f"\nMissing fields:")
     print(f"  ISIN:         {missing_isin:>5}  ({missing_isin * 100 // total}%)")
     print(f"  insider_name: {missing_name:>5}  ({missing_name * 100 // total}%)")
