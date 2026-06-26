@@ -76,7 +76,11 @@ def _get_counts(url: str, key: str) -> dict:
     )
     failed_filings = _supabase_count(
         url, key, "filings",
-        {"status": "in.(failed,skipped)"},
+        {"status": "eq.failed"},
+    )
+    skipped_filings = _supabase_count(
+        url, key, "filings",
+        {"status": "eq.skipped"},
     )
     pending_issuers = _supabase_count(
         url, key, "unmatched_issuers",
@@ -85,6 +89,7 @@ def _get_counts(url: str, key: str) -> dict:
     return {
         "pending_transactions": pending_tx,
         "failed_filings": failed_filings,
+        "skipped_filings": skipped_filings,
         "pending_issuers": pending_issuers,
     }
 
@@ -117,7 +122,7 @@ def _get_sample_filings(url: str, key: str, limit: int = 5) -> list[dict]:
 # ─── Email rendering ──────────────────────────────────────────────────────────
 
 def _render_html(counts: dict, sample_tx: list[dict], sample_filings: list[dict]) -> str:
-    total = counts["pending_transactions"] + counts["failed_filings"] + counts["pending_issuers"]
+    total = counts["pending_transactions"] + counts["failed_filings"] + counts["skipped_filings"] + counts["pending_issuers"]
     date_str = datetime.now(timezone.utc).strftime("%d %b %Y")
 
     status_color = "#F59E0B" if total > 0 else "#10B981"
@@ -167,7 +172,12 @@ def _render_html(counts: dict, sample_tx: list[dict], sample_filings: list[dict]
       <td style="width:8px"></td>
       <td style="padding:16px;background:#111827;border:1px solid #1E2D45;border-radius:6px;text-align:center">
         <div style="font-size:28px;font-weight:700;color:#EF4444">{counts['failed_filings']}</div>
-        <div style="font-size:12px;color:#9CA3AF;margin-top:4px">Failed filings</div>
+        <div style="font-size:12px;color:#9CA3AF;margin-top:4px">Failed filings (retryable)</div>
+      </td>
+      <td style="width:8px"></td>
+      <td style="padding:16px;background:#111827;border:1px solid #1E2D45;border-radius:6px;text-align:center">
+        <div style="font-size:28px;font-weight:700;color:#6B7280">{counts['skipped_filings']}</div>
+        <div style="font-size:12px;color:#9CA3AF;margin-top:4px">Skipped filings (max retries)</div>
       </td>
       <td style="width:8px"></td>
       <td style="padding:16px;background:#111827;border:1px solid #1E2D45;border-radius:6px;text-align:center">
@@ -193,7 +203,7 @@ def _render_html(counts: dict, sample_tx: list[dict], sample_filings: list[dict]
   </div>''' if sample_tx else ''}
 
   {f'''<div style="margin-bottom:24px">
-    <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#9CA3AF;margin:0 0 8px">Recent failed filings (sample)</p>
+    <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#9CA3AF;margin:0 0 8px">Recent failed &amp; skipped filings (sample)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead>
         <tr style="border-bottom:1px solid #1E2D45">
@@ -265,7 +275,7 @@ def main() -> None:
 
     if counts["pending_transactions"] > 0:
         sample_tx = _get_sample_transactions(url, key, limit=5)
-    if counts["failed_filings"] > 0:
+    if counts["failed_filings"] > 0 or counts["skipped_filings"] > 0:
         sample_filings = _get_sample_filings(url, key, limit=5)
 
     date_str = datetime.now(timezone.utc).strftime("%d %b %Y")

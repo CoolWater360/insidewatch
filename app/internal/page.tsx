@@ -46,7 +46,7 @@ export default async function InternalDashboard() {
     );
   }
 
-  let counts = { pendingTransactions: 0, failedFilings: 0, pendingIssuers: 0 };
+  let counts = { pendingTransactions: 0, failedFilings: 0, skippedFilings: 0, pendingIssuers: 0 };
   let recentTx = { rows: [] as Awaited<ReturnType<typeof getTransactionsForReview>>["rows"] };
 
   try {
@@ -63,7 +63,7 @@ export default async function InternalDashboard() {
   }
 
   const total =
-    counts.pendingTransactions + counts.failedFilings + counts.pendingIssuers;
+    counts.pendingTransactions + counts.failedFilings + counts.skippedFilings + counts.pendingIssuers;
 
   return (
     <div className="space-y-8">
@@ -76,7 +76,7 @@ export default async function InternalDashboard() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <QueueCard
           href="/internal/transactions"
           label="Transactions to review"
@@ -90,6 +90,12 @@ export default async function InternalDashboard() {
           count={counts.failedFilings}
           description="Download or parse errors — eligible for retry"
           urgent
+        />
+        <QueueCard
+          href="/internal/filings"
+          label="Skipped filings"
+          count={counts.skippedFilings}
+          description="Max retries reached — requires manual reset"
         />
         <QueueCard
           href="/internal/issuers"

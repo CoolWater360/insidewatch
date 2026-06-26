@@ -14,9 +14,9 @@ export default async function FailedFilingsPage({ searchParams }: Props) {
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
         <h1 className="text-xl font-semibold text-[#E8EDF7]">
-          Failed filings
+          Failed &amp; skipped filings
         </h1>
-        <span className="text-sm text-muted">{result.total} failed / skipped</span>
+        <span className="text-sm text-muted">{result.total} total</span>
       </div>
 
       {result.rows.length === 0 ? (

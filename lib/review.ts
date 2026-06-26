@@ -5,6 +5,7 @@ import { getSupabaseServer } from "./supabase-server";
 export interface ReviewQueueCounts {
   pendingTransactions: number;
   failedFilings: number;
+  skippedFilings: number;
   pendingIssuers: number;
 }
 
@@ -85,7 +86,7 @@ export interface PaginatedResult<T> {
 export async function getReviewQueueCounts(): Promise<ReviewQueueCounts> {
   const db = getSupabaseServer();
 
-  const [txResult, filingResult, issuerResult] = await Promise.all([
+  const [txResult, failedResult, skippedResult, issuerResult] = await Promise.all([
     db
       .from("transactions")
       .select("id", { count: "exact", head: true })
@@ -94,7 +95,11 @@ export async function getReviewQueueCounts(): Promise<ReviewQueueCounts> {
     db
       .from("filings")
       .select("id", { count: "exact", head: true })
-      .in("status", ["failed", "skipped"]),
+      .eq("status", "failed"),
+    db
+      .from("filings")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "skipped"),
     db
       .from("unmatched_issuers")
       .select("id", { count: "exact", head: true })
@@ -103,7 +108,8 @@ export async function getReviewQueueCounts(): Promise<ReviewQueueCounts> {
 
   return {
     pendingTransactions: txResult.count ?? 0,
-    failedFilings: filingResult.count ?? 0,
+    failedFilings: failedResult.count ?? 0,
+    skippedFilings: skippedResult.count ?? 0,
     pendingIssuers: issuerResult.count ?? 0,
   };
 }

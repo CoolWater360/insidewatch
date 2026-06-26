@@ -122,6 +122,8 @@ describe("getReviewQueueCounts", () => {
     setMock([], null, null);
     const result = await getReviewQueueCounts();
     expect(result.pendingTransactions).toBe(0);
+    expect(result.failedFilings).toBe(0);
+    expect(result.skippedFilings).toBe(0);
   });
 
   it("filters on needs_review=true and review_status population", async () => {
@@ -129,6 +131,20 @@ describe("getReviewQueueCounts", () => {
     await getReviewQueueCounts();
     expect(_chain.eq as jest.Mock).toHaveBeenCalledWith("needs_review", true);
     expect(_chain.or as jest.Mock).toHaveBeenCalledWith(REVIEW_FILTER);
+  });
+
+  it("queries failed and skipped with separate eq filters", async () => {
+    setMock([], 5, null);
+    await getReviewQueueCounts();
+    expect(_chain.eq as jest.Mock).toHaveBeenCalledWith("status", "failed");
+    expect(_chain.eq as jest.Mock).toHaveBeenCalledWith("status", "skipped");
+  });
+
+  it("result has both failedFilings and skippedFilings fields", async () => {
+    setMock([], 3, null);
+    const result = await getReviewQueueCounts();
+    expect(result).toHaveProperty("failedFilings");
+    expect(result).toHaveProperty("skippedFilings");
   });
 });
 
