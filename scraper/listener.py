@@ -137,8 +137,14 @@ def _run_with_ledger(client, session: requests.Session, stats: dict, storage_bac
 
     logger.info("Listing page: %d rows", len(rows))
 
-    # Step 2: register all rows in the ledger, collect eligible ones
-    to_process: list[dict] = []
+    # Global context override: if ALERT_CONTEXT=backfill is set in the environment
+    # (e.g. during a manually triggered maintenance run), suppress all alerts.
+    global_context = os.getenv("ALERT_CONTEXT", "live")
+
+    # Step 2: register all rows in the ledger, collect eligible ones.
+    # Filings discovered on the current listing page are genuine live discoveries
+    # → alert_context="live" so an email fires immediately on ingestion.
+    to_process: list[tuple] = []
     for row in rows:
         try:
             filing = filing_ledger.register_filing(
@@ -150,14 +156,16 @@ def _run_with_ledger(client, session: requests.Session, stats: dict, storage_bac
             if filing["status"] in ("completed", "in_progress"):
                 stats["skipped"] += 1
             elif filing_ledger.is_eligible(filing):
-                to_process.append((row, filing))
+                to_process.append((row, filing, global_context))
             else:
                 stats["skipped"] += 1
         except Exception as exc:
             logger.error("register_filing failed for %s: %s", row.pdf_url, exc)
             stats["errors"] += 1
 
-    # Step 3: also pick up retryable failed filings not on today's listing
+    # Step 3: also pick up retryable failed filings not on today's listing.
+    # These are catch-up retries of old sweep failures — treat as backfill so
+    # they do NOT fire live alerts and cause a burst when many are retried at once.
     try:
         retryable = filing_ledger.get_retryable_filings(client)
         for filing in retryable:
@@ -167,22 +175,34 @@ def _run_with_ledger(client, session: requests.Session, stats: dict, storage_bac
                 company_name=filing.get("company_name") or "",
             )
             # Avoid adding duplicates already in to_process
-            existing_urls = {r.pdf_url for r, _ in to_process}
+            existing_urls = {r.pdf_url for r, _f, _c in to_process}
             if filing["pdf_url"] not in existing_urls:
-                to_process.append((row, filing))
+                # Retry-queue filings use "backfill" regardless of global_context:
+                # they were already missed by a sweep and do not represent new discoveries.
+                retry_context = "backfill"
+                logger.info(
+                    "Filing %d queued as retry (context=backfill): %s",
+                    filing["id"], filing["pdf_url"],
+                )
+                to_process.append((row, filing, retry_context))
     except Exception as exc:
         logger.warning("get_retryable_filings failed: %s", exc)
 
-    stats["skipped"] = len(rows) - sum(1 for r, _ in to_process if r.pdf_url in {lr.pdf_url for lr in rows})
+    stats["skipped"] = len(rows) - sum(
+        1 for r, _f, _c in to_process if r.pdf_url in {lr.pdf_url for lr in rows}
+    )
     logger.info("%d filing(s) to process", len(to_process))
 
     if not to_process:
         return stats
 
     # Step 4: process eligible filings
-    for row, filing in to_process:
+    for row, filing, alert_context in to_process:
         try:
-            result = _process_filing_with_ledger(row, filing, client, session, storage_backend)
+            result = _process_filing_with_ledger(
+                row, filing, client, session, storage_backend,
+                alert_context=alert_context,
+            )
             if result == "new":
                 stats["new"] += 1
             elif result == "retried":
@@ -202,10 +222,15 @@ def _process_filing_with_ledger(
     client,
     session: requests.Session,
     storage_backend,
+    alert_context: str = "live",
 ) -> str:
     """
     Download, parse, upsert, and complete/fail one filing using the ledger.
     Returns 'new', 'retried', or 'skipped' (race lost).
+
+    alert_context controls whether ingested transactions fire live alerts:
+      'live'     — dispatch immediately (listing-page discoveries)
+      'backfill' — suppress alerts (retry-queue catch-ups)
     """
     filing_id = filing["id"]
     is_retry  = filing.get("attempt_count", 0) > 0  # capture before claim increments
@@ -339,6 +364,11 @@ def _process_filing_with_ledger(
             if tx.insider_verified and not tx.needs_review:
                 try:
                     tier = _get_company_tier(client, result.get("company_id"))
+                    logger.info(
+                        "Filing %d tx %d: dispatching alert (context=%s) %s %s €%.0f",
+                        filing_id, result["transaction_id"], alert_context,
+                        tx.company_name, tx.direction, tx.total_value,
+                    )
                     dispatch(
                         AlertPayload(
                             company_name=tx.company_name,
@@ -358,6 +388,7 @@ def _process_filing_with_ledger(
                         ),
                         client=client,
                         company_tier=tier,
+                        context=alert_context,
                     )
                 except Exception as alert_exc:
                     logger.warning("Alert dispatch failed: %s", alert_exc)
