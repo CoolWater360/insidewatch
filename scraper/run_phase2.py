@@ -165,6 +165,7 @@ def _crawl_company(
 
             # ── Store raw PDF — Phase 3 gate ──────────────────────────────────
             pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+            raw_text = None  # set inside storage block; used below for skip context
             if use_ledger and filing_id and storage_backend is not None:
                 try:
                     storage_path, _ = doc_storage.store_pdf(
@@ -207,9 +208,15 @@ def _crawl_company(
             transactions = parse_pdf(pdf_bytes, row.pdf_url, row.filing_date)
             if not transactions:
                 if use_ledger and filing_id:
+                    if raw_text is None:
+                        skip_reason = "no transactions parsed from PDF"
+                    elif not raw_text.strip():
+                        skip_reason = "no text extracted from PDF — possible download corruption or pdfplumber failure"
+                    else:
+                        skip_reason = "no transactions in extracted text — possible layout mismatch or genuinely empty filing"
                     filing_ledger.skip_filing(
                         client, filing_id,
-                        reason="no transactions parsed from PDF",
+                        reason=skip_reason,
                         claim_token=claim_token,
                     )
                 continue
