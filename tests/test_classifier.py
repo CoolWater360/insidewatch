@@ -513,3 +513,172 @@ class TestMixedFiling:
     def test_derivative_excluded_from_discretionary(self):
         from scraper.classifier import _DISCRETIONARY
         assert "derivative_transaction" not in _DISCRETIONARY
+
+
+# ─── Disposal + tax-withholding sell-to-cover (UniCredit regression) ──────────
+
+class TestDisposalTaxWithholding:
+    """
+    Regression tests for the UniCredit 'Other - DISPOSAL TO PAY OUT TAXES'
+    classification failure (PARSER_VERSION < 1.2.1 produced direction=unknown).
+
+    The classifier must recognise 'DISPOSAL' + an explicit tax/withholding
+    keyword as sell_to_cover / mechanical regardless of what direction the
+    parser signals, while NOT over-firing on:
+      - 'DISPOSAL' alone (no tax context) → sell, not sell_to_cover
+      - 'variable remuneration' alone (no disposal verb) → not classified here
+      - generic 'Other' text with no recognised keyword → undetermined
+    """
+
+    # ── True positives ────────────────────────────────────────────────────────
+
+    def test_disposal_to_pay_out_taxes_full_phrase(self):
+        nature = "Other - DISPOSAL (DISPOSAL TO PAY OUT TAXES RELATED TO VARIABLE REMUNERATION PAYMENTS IN SHARES FOR 2025)"
+        r = classify("unknown", nature, 40.25, 5000.0, "other", [])
+        assert r.transaction_type == "sell_to_cover", r.rationale
+        assert r.economic_intent == "mechanical"
+        assert r.needs_review is False
+        assert "disposal+tax" in r.rationale
+
+    def test_disposal_with_tax_keyword_capitalisation_variants(self):
+        for nature in (
+            "disposal to pay taxes",
+            "DISPOSAL TO PAY TAXES",
+            "Disposal (withholding tax)",
+            "Other - DISPOSAL IMPOSTA",
+            "DISMISSIONE FISCALE",
+        ):
+            r = classify("unknown", nature, 5.0, 100.0, "other", [])
+            assert r.transaction_type == "sell_to_cover", (
+                f"Expected sell_to_cover for {nature!r}, got {r.transaction_type!r}: {r.rationale}"
+            )
+
+    def test_disposal_tax_direction_unknown_is_still_sell_to_cover(self):
+        # Parser may return direction=unknown when the filing lacks Altro keyword.
+        nature = "DISPOSAL TO PAY TAXES"
+        r = classify("unknown", nature, 10.0, 1000.0, "other", [])
+        assert r.transaction_type == "sell_to_cover"
+        assert r.economic_intent == "mechanical"
+
+    def test_disposal_tax_direction_sell_is_also_sell_to_cover(self):
+        # If parser does resolve direction=sell, rule still fires.
+        nature = "DISPOSAL TO PAY OUT TAXES"
+        r = classify("sell", nature, 10.0, 1000.0, "sell", [])
+        assert r.transaction_type == "sell_to_cover"
+
+    def test_dismissione_ritenuta_italian_equivalent(self):
+        nature = "DISMISSIONE PER PAGAMENTO RITENUTA SU REMUNERAZIONE VARIABILE"
+        r = classify("unknown", nature, 8.0, 200.0, "other", [])
+        assert r.transaction_type == "sell_to_cover"
+        assert r.economic_intent == "mechanical"
+
+    # ── True negatives — must NOT over-fire ───────────────────────────────────
+
+    def test_disposal_alone_without_tax_is_sell_not_sell_to_cover(self):
+        # 'DISPOSAL' with no tax context = plain sell; do not promote to sell_to_cover.
+        nature = "DISPOSAL OF SHARES ON MARKET"
+        r = classify("sell", nature, 10.0, 500.0, "sell", [])
+        assert r.transaction_type == "sell", (
+            f"Plain disposal without tax keyword should stay 'sell', got {r.transaction_type!r}"
+        )
+
+    def test_variable_remuneration_alone_does_not_trigger_rule(self):
+        # Only 'variable remuneration' with no disposal or tax keyword must not
+        # be reclassified — the rationale must not mention disposal+tax.
+        nature = "VARIABLE REMUNERATION PAYMENTS IN SHARES"
+        r = classify("unknown", nature, 0.0, 0.0, "other", [])
+        assert "disposal+tax" not in r.rationale
+        # No DISPOSAL keyword → rule does not fire; outcome is undetermined
+        assert r.transaction_type == "unknown"
+
+    def test_tax_keyword_alone_without_disposal_does_not_trigger_rule(self):
+        # TAX appearing without a disposal verb is not sufficient.
+        nature = "SHARE PURCHASE PLAN TAX BENEFIT"
+        r = classify("buy", nature, 5.0, 100.0, "buy", [])
+        assert r.transaction_type != "sell_to_cover"
+
+    def test_generic_other_unknown_description_stays_undetermined(self):
+        # Altro/Other with no recognised keyword → undetermined, not sell_to_cover.
+        nature = "OTHER TRANSACTION"
+        r = classify("unknown", nature, 5.0, 50.0, "other", [])
+        assert r.transaction_type == "unknown"
+        assert r.needs_review is True
+
+    # ── Economic intent and alert suppression ─────────────────────────────────
+
+    def test_sell_to_cover_is_mechanical_not_discretionary(self):
+        from scraper.classifier import _MECHANICAL, _DISCRETIONARY
+        assert "sell_to_cover" in _MECHANICAL
+        assert "sell_to_cover" not in _DISCRETIONARY
+
+    def test_sell_to_cover_excluded_from_alerts_by_default(self):
+        # Ensures ALERT_EXCLUDE_MECHANICAL=true (default) suppresses sell_to_cover.
+        from scraper.alerts import MECHANICAL_TRANSACTION_TYPES
+        assert "sell_to_cover" in MECHANICAL_TRANSACTION_TYPES
+
+
+# ─── Parser _parse_direction: Altro/Other English-only form ──────────────────
+
+class TestParserDisposalDirection:
+    """
+    Unit tests for the parser's _parse_direction function covering the
+    'Other - DISPOSAL' English-only pattern (no Italian 'Altro' prefix).
+    """
+
+    def _parse(self, section_4b_text: str):
+        from scraper.parser import _parse_direction
+        return _parse_direction(section_4b_text)
+
+    def test_other_dash_disposal_tax_gives_sell_to_cover(self):
+        block = (
+            "Natura dell'operazione\n"
+            "Other - DISPOSAL (DISPOSAL TO PAY OUT TAXES RELATED TO VARIABLE REMUNERATION PAYMENTS IN SHARES FOR 2025)\n"
+            "A norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n"
+        )
+        direction, tx_type, warns = self._parse(block)
+        assert direction == "sell", f"Got direction={direction!r}"
+        assert tx_type == "sell_to_cover", f"Got tx_type={tx_type!r}"
+
+    def test_altro_other_disposal_tax_gives_sell_to_cover(self):
+        # Bilingual form also works (regression-proof)
+        block = (
+            "Natura dell'operazione\n"
+            "Altro/Other - DISPOSAL TO PAY OUT TAXES\n"
+            "A norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n"
+        )
+        direction, tx_type, _ = self._parse(block)
+        assert direction == "sell"
+        assert tx_type == "sell_to_cover"
+
+    def test_other_dash_disposal_no_tax_gives_sell(self):
+        block = (
+            "Natura dell'operazione\n"
+            "Other - DISPOSAL OF SHARES ON MARKET\n"
+            "A norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n"
+        )
+        direction, tx_type, _ = self._parse(block)
+        assert direction == "sell"
+        assert tx_type == "sell"  # plain sell, not sell_to_cover
+
+    def test_other_dash_grant_description_gives_buy_grant(self):
+        block = (
+            "Natura dell'operazione\n"
+            "Other - AWARD OF FREE SHARES\n"
+            "A norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n"
+        )
+        direction, tx_type, _ = self._parse(block)
+        assert direction == "buy"
+        assert tx_type == "grant"
+
+    def test_other_without_dash_does_not_match_english_only_form(self):
+        # "other" as an adjective mid-sentence must not trigger the English-only branch.
+        # The Layout 1 section 4b in this block contains only "ACQUISTO" — parser
+        # must resolve to buy, not be confused by "other" in the footnote.
+        block = (
+            "Natura dell'operazione\n"
+            "ACQUISTO\n"
+            "A norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n"
+            "other information may be available from the registrar\n"
+        )
+        direction, tx_type, _ = self._parse(block)
+        assert direction == "buy"

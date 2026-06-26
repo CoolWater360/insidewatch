@@ -231,6 +231,20 @@ def classify(
                  "PIANO DI INCENTIVAZIONE", "STOCK OPTION"):
         return _result("option_exercise", "raw_nature_keyword: option exercise signal", confidence=0.85)
 
+    # Sell-to-cover: shares disposed to pay withholding tax on variable
+    # remuneration / share award plans.  "DISPOSAL" is the English term used
+    # by some issuers (e.g. UniCredit) in the Altro/Other free-text field.
+    # Require an explicit tax/withholding keyword — do not reclassify a generic
+    # disposal or a standalone "variable remuneration" mention as sell_to_cover.
+    if _contains(nature, "DISPOSAL", "DISMISSIONE") and _contains(
+        nature, "TAX", "FISCAL", "IMPOSTA", "RITENUTA", "WITHHOLDING"
+    ):
+        return _result(
+            "sell_to_cover",
+            "raw_nature_keyword: disposal+tax-withholding → sell_to_cover",
+            confidence=0.85,
+        )
+
     # Sell-to-cover can appear without an explicit grant keyword when the nature
     # text only says the sale is for coverage/tax purposes.
     if direction == "sell" and _contains(nature, "COPERTURA", "COVER", "FISCALE"):

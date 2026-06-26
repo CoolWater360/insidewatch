@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Increment this when the parser logic changes in a way that may produce
 # different output from the same PDF.  Format: '<major>.<minor>.<patch>'
 # Legacy records (pre-Phase 1) are labelled '0.0.0' via migration 001.
-PARSER_VERSION = "1.2.0"
+PARSER_VERSION = "1.2.1"
 
 # ─── Direction + transaction-type lookup ─────────────────────────────────────
 # Maps keyword → (direction, transaction_type).
@@ -285,14 +285,29 @@ def _parse_direction(tx_block: str) -> tuple[str, str, list[str]]:
     # The filing uses "Altro/Other" as the top-level label and puts the real
     # nature in the description text that follows. Parse that description.
     # Use IGNORECASE so degarbled "ALTRO" (all-caps) is also matched.
+    #
+    # Two supported forms:
+    #   "Altro/Other DESCRIPTION"  — bilingual standard form
+    #   "Other - DESCRIPTION"      — English-only form used by some larger issuers
+    #     (e.g. UniCredit).  The dash is required in the English-only case to
+    #     avoid matching "other" as an adjective in bilingual footnotes.
     altro_m = re.search(
-        r"altro\s*/?\s*other\s*[-–—]?\s*(.{0,400})",
+        r"(?:altro\s*/?\s*other|other\s*[-–—])\s*(.{0,400})",
         target,
         re.DOTALL | re.IGNORECASE,
     )
     if altro_m:
         desc = altro_m.group(1).upper()
-        if any(k in desc for k in ("ASSEGNAZIONE", "ATTRIBUZIONE", "GRATUITO", "AWARD", "ATTRIBUTION")):
+        # Sell-to-cover: shares disposed to pay withholding tax on variable
+        # remuneration / share award plans.  "DISPOSAL" + explicit tax keyword
+        # is the English phrasing used by UniCredit and similar issuers in the
+        # Altro/Other free-text field.  Checked first so it wins over the
+        # generic DISPOSAL → sell fallthrough below.
+        if any(k in desc for k in ("DISPOSAL", "DISMISSIONE")) and any(
+            k in desc for k in ("TAX", "FISCAL", "IMPOSTA", "RITENUTA", "WITHHOLDING")
+        ):
+            direction, tx_type = "sell", "sell_to_cover"
+        elif any(k in desc for k in ("ASSEGNAZIONE", "ATTRIBUZIONE", "GRATUITO", "AWARD", "ATTRIBUTION")):
             if "VENDITA" in desc or "SELL" in desc or "COPERTURA" in desc or "COVER" in desc:
                 # Sell-to-cover: selling free shares to cover tax liability
                 direction, tx_type = "sell", "sell_to_cover"
@@ -300,7 +315,7 @@ def _parse_direction(tx_block: str) -> tuple[str, str, list[str]]:
                 direction, tx_type = "buy", "grant"
         elif any(k in desc for k in ("ESERCIZIO", "EXERCISE", "OPZION", "OPTION", "WARRANT")):
             direction, tx_type = "buy", "option_exercise"
-        elif any(k in desc for k in ("VENDITA", "CESSIONE", "SELL", "SALE")):
+        elif any(k in desc for k in ("DISPOSAL", "VENDITA", "CESSIONE", "SELL", "SALE")):
             direction, tx_type = "sell", "sell"
         elif any(k in desc for k in ("ACQUISTO", "PURCHASE", "ACQUIS")):
             direction, tx_type = "buy", "buy"

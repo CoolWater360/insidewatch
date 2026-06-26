@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "id": "unicredit_disposal_sell_to_cover",
+    "description": "Regression: UniCredit 'Other - DISPOSAL TO PAY OUT TAXES' pattern. Parser must recognise English-only 'Other -' prefix and DISPOSAL+tax keyword. Was misclassified as direction=unknown/undetermined before PARSER_VERSION 1.2.1.",
+    "layout": 1,
+    "source_filing_id": 325,
+    "source_url": "https://www.borsaitaliana.it/nisavvsource/pdf/2025/8327.pdf"
+  },
+  "raw_text": "AVVISO n.8327 del 15 Gennaio 2025\nMittente del comunicato : UniCredit S.p.A.\nOggetto : Internal dealing - comunicazione ai sensi dell'art. 19 del Regolamento UE\n\nSEZIONE 1\nDati relativi alla persona che esercita funzioni di amministrazione\na)\nNome: Andrea Cognome: Orcel\nRuolo: Persona che esercita funzioni di amministrazione\nRole: Person exercising managerial responsibilities\n\nOperazione - 1\nTransaction - 1\nISIN: IT0005239360\nDescription of the Azioni Ordinarie\nNatura dell'operazione\nOther - DISPOSAL (DISPOSAL TO PAY OUT TAXES RELATED TO VARIABLE REMUNERATION PAYMENTS IN SHARES FOR 2025)\nA norma dell'articolo 19 del Regolamento (UE) n. 596/2014\n\nPrice(s) and Volume(s)\n40.25 EUR 5000\n\nInformazioni aggregate\nVolume aggregato: 5000\nPrezzo: 40.25 EUR\n\nData dell'operazione 2025-01-14\n",
+  "source_url": "https://www.borsaitaliana.it/nisavvsource/pdf/2025/8327.pdf",
+  "filing_date": "2025-01-15",
+  "expected": {
+    "count": 1,
+    "transactions": [
+      {
+        "insider_name": "Andrea Orcel",
+        "company_name": "UniCredit S.p.A.",
+        "isin": "IT0005239360",
+        "direction": "sell",
+        "transaction_type": "sell_to_cover",
+        "economic_intent": "mechanical",
+        "transaction_date": "2025-01-14",
+        "quantity": 5000.0,
+        "unit_price": 40.25,
+        "currency": "EUR",
+        "needs_review": false,
+        "min_extraction_confidence": 0.85
+      }
+    ]
+  }
+}

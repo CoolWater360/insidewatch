@@ -82,6 +82,7 @@ def _fetch_filings(
     reprocess_all: bool,
     current_parser_version: str,
     limit: int,
+    filing_id: Optional[int] = None,
 ) -> list:
     """
     Query completed filings that are candidates for reprocessing.
@@ -95,6 +96,12 @@ def _fetch_filings(
         .eq("status", "completed")
         .not_.is_("raw_extracted_text", "null")
     )
+
+    if filing_id is not None:
+        # Targeted single-filing reprocess — bypass date and version filters.
+        query = query.eq("id", filing_id)
+        result = query.limit(1).execute()
+        return result.data or []
 
     if since:
         query = query.gte("source_published_utc", since)
@@ -254,6 +261,7 @@ def run_reprocessing(
     dry_run: bool = True,
     reprocess_all: bool = False,
     snapshot_dir: Optional[str] = None,
+    filing_id: Optional[int] = None,
 ) -> dict:
     """
     Main entry point — callable from tests or other scripts.
@@ -286,6 +294,7 @@ def run_reprocessing(
         reprocess_all=reprocess_all,
         current_parser_version=PARSER_VERSION,
         limit=limit,
+        filing_id=filing_id,
     )
 
     logger.info("Found %d filing(s) to reprocess.", len(filings))
@@ -381,6 +390,16 @@ def main() -> None:
         help="Only reprocess filings published on or before this date.",
     )
     parser.add_argument(
+        "--filing-id",
+        type=int,
+        default=None,
+        metavar="ID",
+        help=(
+            "Reprocess a single filing by its filings.id.  Bypasses date and "
+            "parser-version filters.  Use for targeted bug-fix reprocessing."
+        ),
+    )
+    parser.add_argument(
         "--snapshot-dir",
         default=None,
         metavar="DIR",
@@ -401,6 +420,7 @@ def main() -> None:
         dry_run=not args.apply,
         reprocess_all=args.reprocess_all,
         snapshot_dir=args.snapshot_dir,
+        filing_id=args.filing_id,
     )
 
     indent = 2 if args.pretty else None
