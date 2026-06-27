@@ -88,11 +88,11 @@ def _fetch_filings(
     Query completed filings that are candidates for reprocessing.
 
     Returns a list of dicts with keys:
-      id, source_url, pdf_sha256, raw_extracted_text, source_published_utc
+      id, pdf_url, pdf_sha256, raw_extracted_text, source_published_utc
     """
     query = (
         client.table("filings")
-        .select("id,source_url,pdf_sha256,raw_extracted_text,source_published_utc")
+        .select("id,pdf_url,pdf_sha256,raw_extracted_text,source_published_utc")
         .eq("status", "completed")
         .not_.is_("raw_extracted_text", "null")
     )
@@ -158,7 +158,7 @@ def _reprocess_filing(
     from .db import upsert_transaction, record_filing_processing_run
 
     filing_id = filing["id"]
-    source_url = filing.get("source_url", "")
+    source_url = filing.get("pdf_url", "")
     pdf_sha256 = filing.get("pdf_sha256") or ""
     raw_text = filing.get("raw_extracted_text", "")
     filing_date_dmy = _to_filing_date_dmy(filing.get("source_published_utc"))
