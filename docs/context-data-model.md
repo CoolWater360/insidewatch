@@ -725,79 +725,116 @@ CREATE INDEX idx_corporate_events_announced  ON corporate_events(announcement_da
 
 ### 6.8 `context_event_links`
 
-Links context events to transactions, signals, or issuers.
+> **Design change vs. draft (applied in migration 019):** The original draft
+> used a polymorphic pair `(link_target_type TEXT, link_target_id BIGINT)` for
+> the link target.  This was replaced with **concrete FK columns**
+> (`transaction_id`, `issuer_id`) protected by a mutual-exclusion CHECK
+> constraint.  Reasons:
+> - Postgres can enforce referential integrity on concrete FKs (not on a
+>   polymorphic id column).
+> - Partial unique indexes on concrete columns are simpler and more efficient.
+> - There are exactly two link targets (transactions, issuers); the "open for
+>   extension" argument for polymorphism does not apply here.
+> - `link_type` vocabulary was also revised: proximity/explicit/heuristic
+>   replaced by same_issuer/same_person/causal/concurrent/related_party/
+>   background/other, which are more analytic than mechanical.
+> - Versioning columns (is_current, superseded_by, etc.) were added to match
+>   the pattern on all other Phase 17A tables.
+
+Links context events to transactions or issuers.
 Each row records **why** the link was made and at what confidence.
 
 A link never modifies the linked transaction. It is purely additive context.
 
 ```sql
 CREATE TABLE context_event_links (
-    id               BIGSERIAL PRIMARY KEY,
+    id              BIGSERIAL PRIMARY KEY,
 
-    -- Which category of context event.
-    context_type     TEXT NOT NULL CHECK (context_type IN (
-        'ownership_event',
-        'governance_event',
-        'buyback_event',
-        'corporate_event',
-        'entity_relationship'
+    -- Which category of context event (polymorphic — no DB FK).
+    context_type    TEXT NOT NULL CHECK (context_type IN (
+        'ownership',    -- ownership_events
+        'governance',   -- governance_events
+        'buyback',      -- buyback_events
+        'corporate'     -- corporate_events
     )),
+    context_id      BIGINT NOT NULL,
 
-    -- PK in the relevant context table (ownership_events.id, etc.).
-    -- No DB-enforced FK here because the table varies; application layer validates.
-    context_id       BIGINT NOT NULL,
+    -- Link target: exactly one must be non-NULL (enforced by CHECK).
+    transaction_id  BIGINT REFERENCES transactions(id) ON DELETE CASCADE,
+    issuer_id       BIGINT REFERENCES issuers(id)      ON DELETE CASCADE,
 
-    -- What the context is linked to.
-    link_target_type TEXT NOT NULL CHECK (link_target_type IN (
-        'transaction',
-        'issuer'
+    CONSTRAINT chk_cel_exactly_one_target
+        CHECK (
+            (transaction_id IS NOT NULL AND issuer_id IS NULL)
+            OR
+            (transaction_id IS NULL     AND issuer_id IS NOT NULL)
+        ),
+
+    -- Nature of the analytical relationship between context and target.
+    link_type       TEXT NOT NULL CHECK (link_type IN (
+        'same_issuer',    -- context event and target share the same issuer
+        'same_person',    -- context event and target share the same person
+        'causal',         -- context event causally explains the target
+        'concurrent',     -- occurred in close proximity to the target
+        'related_party',  -- context involves a related party of the target
+        'background',     -- general background / informational context
+        'other'
     )),
-    link_target_id   BIGINT NOT NULL,
-
-    -- Nature of the link.
-    link_type        TEXT NOT NULL CHECK (link_type IN (
-        'proximity',           -- event is within N days of the transaction
-        'explicit',            -- source directly connects event to transaction
-        'heuristic',           -- algorithmic rule (not source-backed)
-        'reviewer_confirmed'   -- human confirmed the link
-    )),
-
-    -- Time window used for proximity links (days). NULL for non-proximity links.
-    window_days      INT,
 
     -- Evidence quality of the link itself.
-    confidence       TEXT NOT NULL DEFAULT 'heuristic_suggestion'
-                         CHECK (confidence IN (
-                             'parsed_fact',
-                             'heuristic_suggestion',
-                             'reviewer_confirmed'
-                         )),
+    confidence      TEXT NOT NULL DEFAULT 'heuristic_suggestion'
+                        CHECK (confidence IN (
+                            'parsed_fact',
+                            'heuristic_suggestion',
+                            'reviewer_confirmed'
+                        )),
 
-    -- Plain-English reason for the link (shown to researchers).
-    explanation      TEXT,
+    -- Provenance of the link assertion (may differ from the context event's source).
+    source_id       BIGINT NOT NULL REFERENCES context_sources(id) ON DELETE RESTRICT,
 
-    -- Who or what created this link.
-    created_by       TEXT NOT NULL,   -- 'parser:<ver>' | 'heuristic:<rule>' | 'operator:<name>'
+    -- Operator annotation.
+    analyst_note    TEXT,
+
+    -- Versioning (same pattern as all other Phase 17A event tables).
+    is_current      BOOLEAN NOT NULL DEFAULT TRUE,
+    version_number  INT     NOT NULL DEFAULT 1,
+    superseded_by   BIGINT  REFERENCES context_event_links(id) ON DELETE SET NULL,
+    superseded_at   TIMESTAMPTZ,
 
     -- Review workflow.
-    reviewed_by      TEXT,
-    reviewed_at      TIMESTAMPTZ,
+    review_status   TEXT NOT NULL DEFAULT 'pending_review'
+                        CHECK (review_status IN (
+                            'pending_review', 'confirmed', 'rejected'
+                        )),
+    reviewed_by     TEXT,
+    reviewed_at     TIMESTAMPTZ,
 
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    -- Unique: one link per (context_type, context_id, link_target_type, link_target_id, link_type).
-    UNIQUE (context_type, context_id, link_target_type, link_target_id, link_type)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
-**Key indexes:**
+**Natural event identity** (partial unique indexes):
 ```sql
-CREATE INDEX idx_ctx_links_target_tx     ON context_event_links(link_target_id) WHERE link_target_type = 'transaction';
-CREATE INDEX idx_ctx_links_target_issuer ON context_event_links(link_target_id) WHERE link_target_type = 'issuer';
-CREATE INDEX idx_ctx_links_context       ON context_event_links(context_type, context_id);
-CREATE INDEX idx_ctx_links_type          ON context_event_links(link_type);
-CREATE INDEX idx_ctx_links_confidence    ON context_event_links(confidence);
+-- One current link per context event + link type + transaction.
+CREATE UNIQUE INDEX uidx_cel_tx_current
+    ON context_event_links(context_type, context_id, link_type, transaction_id)
+    WHERE is_current = TRUE AND transaction_id IS NOT NULL;
+
+-- One current link per context event + link type + issuer.
+CREATE UNIQUE INDEX uidx_cel_issuer_current
+    ON context_event_links(context_type, context_id, link_type, issuer_id)
+    WHERE is_current = TRUE AND issuer_id IS NOT NULL;
 ```
+
+**ON DELETE choices:**
+
+| FK | ON DELETE | Rationale |
+|----|-----------|-----------|
+| `transaction_id → transactions` | CASCADE | Link is derived context; if the tx is deleted the link has no target |
+| `issuer_id → issuers` | CASCADE | Same reasoning |
+| `source_id → context_sources` | RESTRICT | Provenance must not be silently lost |
+| `superseded_by → self` | SET NULL | Prevents cycles; old row retains is_current=FALSE |
 
 ---
 
@@ -932,7 +969,7 @@ These must be resolved before or during Phase 17B implementation.
 | # | Question | Recommendation |
 |---|----------|---------------|
 | Q1 | **Polymorphic context_id** — `context_event_links.context_id` has no DB-enforced FK. Should we replace it with separate join tables per context type? | Keep polymorphic for now; add per-type partial indexes. Revisit if query complexity grows in 17C. |
-| Q2 | **signals table** — Phase 17G needs to link context to signals. No `signals` table exists yet. | Add `link_target_type = 'signal'` to the CHECK list when the signals table is created. No schema change needed now. |
+| Q2 | **signals table** — Phase 17G needs to link context to signals. No `signals` table exists yet. | ~~Add `link_target_type = 'signal'` to the CHECK list.~~ Resolved in migration 019: `link_target_type` was removed entirely in favour of concrete FK columns (transaction_id, issuer_id). When signals are added, add a `signal_id BIGINT REFERENCES signals(id)` column and extend the mutual-exclusion CHECK. |
 | Q3 | **entity_versions table** — Should we have a dedicated `entity_relationship_versions` table (like `transaction_versions`) for full history? | Defer to Phase 17F; the supersession column is sufficient for 17B–17E. |
 | Q4 | **Source URL uniqueness** — The same CONSOB disclosure may be available at both a file URL and a landing-page URL. | Canonical URL is required in `source_url`. The document_hash provides a second identity axis if needed. Resolve per source in 17B. |
 | Q5 | **Majority Italian focus** — Most sources are in Italian. Should `entities.legal_name` be normalized to Italian or accept multi-language variants? | Accept source-language text; normalization is an application-layer concern, not a schema constraint. |
