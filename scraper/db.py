@@ -455,6 +455,30 @@ def upsert_transaction(
             }
 
         # ── New transaction ───────────────────────────────────────────────────
+        # direction is part of identity_hash: a parser fix that corrects
+        # direction produces a new hash and a bare INSERT, leaving two
+        # is_current=True rows at the same filing position.  Detect this
+        # before inserting so we can supersede the old row immediately after.
+        _positional_predecessor: Optional[dict] = None
+        if source_filing_id is not None and source_transaction_index is not None:
+            pos_result = (
+                client.table("transactions")
+                .select("id,identity_hash,direction,version_number")
+                .eq("source_filing_id", source_filing_id)
+                .eq("source_transaction_index", source_transaction_index)
+                .eq("is_current", True)
+                .execute()
+            )
+            if pos_result.data:
+                pred = pos_result.data[0]
+                if pred.get("direction") != direction:
+                    _positional_predecessor = pred
+                    logger.info(
+                        "Positional predecessor found: tx %d (direction=%r) → "
+                        "will be superseded after insert (new direction=%r)",
+                        pred["id"], pred.get("direction"), direction,
+                    )
+
         company_id = _resolve_company(client, company_name, isin, filing_id=source_filing_id)
         insider_id = _resolve_insider(
             client, insider_name, insider_role, company_id, insider_verified, role_category
@@ -503,13 +527,27 @@ def upsert_transaction(
         tx = client.table("transactions").insert(payload).execute()
         tx_id = tx.data[0]["id"]
         logger.debug("Inserted transaction %d (identity: %s…)", tx_id, identity_hash[:16])
+
+        if _positional_predecessor:
+            supersede_transaction(
+                client,
+                old_id=_positional_predecessor["id"],
+                new_id=tx_id,
+                reason=(
+                    f"parser {_parser_version} corrected direction: "
+                    f"{_positional_predecessor.get('direction')!r}→{direction!r}"
+                ),
+                changed_by=_parser_version,
+            )
+
         return {
-            "inserted":       True,
-            "updated":        False,
-            "transaction_id": tx_id,
-            "company_id":     company_id,
-            "insider_id":     insider_id,
-            "message":        f"Inserted transaction {tx_id}",
+            "inserted":                  True,
+            "updated":                   False,
+            "transaction_id":            tx_id,
+            "company_id":                company_id,
+            "insider_id":                insider_id,
+            "superseded_predecessor_id": _positional_predecessor["id"] if _positional_predecessor else None,
+            "message":                   f"Inserted transaction {tx_id}",
         }
 
     except Exception as exc:

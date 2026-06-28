@@ -532,5 +532,160 @@ class TestGetTransactionHistory(unittest.TestCase):
         self.assertEqual(history["versions"], [])
 
 
+# ── upsert_transaction: positional predecessor (direction-change) path ────────
+
+class TestUpsertDirectionChangeSupersedesOld(unittest.TestCase):
+    """
+    Regression for the filing-325 incident.
+
+    A parser fix that corrects direction (unknown→sell) produces a new
+    identity_hash (direction is in the formula), so the identity lookup
+    finds nothing and a bare INSERT would leave two is_current=True rows at
+    the same filing position.
+
+    After the fix, upsert_transaction detects the positional predecessor and
+    supersedes it immediately after inserting the corrected row.
+    """
+
+    _FILING_ID = 325
+    _TX_INDEX  = 0
+    _ISIN      = "IT0005239360"
+    _PDF_SHA   = "deadbeef" * 8  # 64-char hex-like string
+
+    def _old_tx(self):
+        return {
+            "id":                       2093,
+            "direction":                "unknown",
+            "transaction_type":         "unknown",
+            "is_current":               True,
+            "version_number":           1,
+            "source_filing_id":         self._FILING_ID,
+            "source_transaction_index": self._TX_INDEX,
+            "identity_hash": compute_identity_hash(
+                self._FILING_ID, self._PDF_SHA, self._TX_INDEX, self._ISIN, "unknown"
+            ),
+            "company_id": 10,
+            "insider_id": 20,
+        }
+
+    def _make_kwargs(self):
+        return _base_upsert_kwargs(
+            direction            = "sell",
+            transaction_type     = "sell_to_cover",
+            isin                 = self._ISIN,
+            source_filing_id     = self._FILING_ID,
+            source_transaction_index = self._TX_INDEX,
+            raw_document_sha256  = self._PDF_SHA,
+            parser_version       = "1.2.1",
+        )
+
+    def _setup_select_side_effect(self, client, responses):
+        call_idx = [0]
+
+        def side_select(*args, **kwargs):
+            chain = MagicMock()
+            resp = responses[min(call_idx[0], len(responses) - 1)]
+            call_idx[0] += 1
+            chain.eq.return_value    = chain
+            chain.order.return_value = chain
+            chain.execute.return_value = resp
+            return chain
+
+        client.table.return_value.select.side_effect = side_select
+
+    # ── direction change → positional supersede ───────────────────────────────
+
+    @patch("scraper.db._resolve_company", return_value=10)
+    @patch("scraper.db._resolve_insider",  return_value=20)
+    def test_direction_change_inserts_new_and_supersedes_old(self, _ins, _co):
+        """Corrected-direction reprocess must insert new row AND supersede old."""
+        client = _mock_client()
+        old_tx = self._old_tx()
+
+        # SELECT call sequence (within the try block):
+        # 0 — identity hash lookup  → [] (sell hash ≠ unknown hash → miss)
+        # 1 — positional lookup     → [old_tx] (same filing position found)
+        # 2 — supersede: fetch old  → [old_tx] (for version snapshot)
+        self._setup_select_side_effect(client, [
+            _make_response([]),
+            _make_response([old_tx]),
+            _make_response([old_tx]),
+        ])
+        _wire_insert(client, {"id": 2094})
+        _wire_update(client)
+
+        result = upsert_transaction(client, **self._make_kwargs())
+
+        self.assertTrue(result["inserted"], "Corrected tx must be inserted")
+        self.assertEqual(result["transaction_id"], 2094)
+        self.assertEqual(
+            result.get("superseded_predecessor_id"), 2093,
+            "superseded_predecessor_id must be the stale tx's id",
+        )
+
+    @patch("scraper.db._resolve_company", return_value=10)
+    @patch("scraper.db._resolve_insider",  return_value=20)
+    def test_first_time_ingest_has_no_superseded_predecessor(self, _ins, _co):
+        """When there is no existing current row at the same position, no supersede."""
+        client = _mock_client()
+
+        self._setup_select_side_effect(client, [
+            _make_response([]),  # identity hash → miss
+            _make_response([]),  # positional   → miss (nothing at this position yet)
+        ])
+        _wire_insert(client, {"id": 500})
+
+        result = upsert_transaction(client, **self._make_kwargs())
+
+        self.assertTrue(result["inserted"])
+        self.assertIsNone(
+            result.get("superseded_predecessor_id"),
+            "First-time ingest must not report a superseded predecessor",
+        )
+
+    @patch("scraper.db._resolve_company", return_value=10)
+    @patch("scraper.db._resolve_insider",  return_value=20)
+    def test_same_direction_predecessor_is_not_superseded(self, _ins, _co):
+        """
+        If the positional predecessor has the same direction, it must not be
+        superseded.  (Same direction → same hash; the identity lookup above
+        would have matched it — this case shouldn't arise in practice but the
+        guard must be defensive.)
+        """
+        client = _mock_client()
+        same_dir_pred = {
+            "id": 999, "direction": "sell", "is_current": True,
+            "version_number": 1,
+        }
+
+        self._setup_select_side_effect(client, [
+            _make_response([]),              # identity hash → miss
+            _make_response([same_dir_pred]), # positional → same direction
+        ])
+        _wire_insert(client, {"id": 500})
+
+        result = upsert_transaction(client, **self._make_kwargs())
+
+        self.assertTrue(result["inserted"])
+        self.assertIsNone(
+            result.get("superseded_predecessor_id"),
+            "Same-direction predecessor must not be superseded",
+        )
+
+    def test_direction_change_produces_different_identity_hashes(self):
+        """Demonstrates why the positional check is necessary."""
+        h_unknown = compute_identity_hash(
+            self._FILING_ID, self._PDF_SHA, self._TX_INDEX, self._ISIN, "unknown"
+        )
+        h_sell = compute_identity_hash(
+            self._FILING_ID, self._PDF_SHA, self._TX_INDEX, self._ISIN, "sell"
+        )
+        self.assertNotEqual(
+            h_unknown, h_sell,
+            "direction is part of identity_hash: unknown→sell must produce a "
+            "different hash, which is why the identity lookup misses the old row",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

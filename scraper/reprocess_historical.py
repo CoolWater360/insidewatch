@@ -163,7 +163,7 @@ def _reprocess_filing(
     raw_text = filing.get("raw_extracted_text", "")
     filing_date_dmy = _to_filing_date_dmy(filing.get("source_published_utc"))
 
-    counts = {"inserted": 0, "versioned": 0, "unchanged": 0, "errors": 0}
+    counts = {"inserted": 0, "versioned": 0, "unchanged": 0, "errors": 0, "superseded": 0}
 
     try:
         transactions = parse_text(raw_text, source_url, filing_date_dmy,
@@ -216,6 +216,8 @@ def _reprocess_filing(
             )
             if result.get("inserted"):
                 counts["inserted"] += 1
+                if result.get("superseded_predecessor_id") is not None:
+                    counts["superseded"] += 1
             elif result.get("updated"):
                 counts["versioned"] += 1
             else:
@@ -248,6 +250,7 @@ def _reprocess_filing(
         "inserted": counts["inserted"],
         "versioned": counts["versioned"],
         "unchanged": counts["unchanged"],
+        "superseded": counts["superseded"],
         "errors": counts["errors"],
         "dry_run": dry_run,
     }
@@ -300,7 +303,7 @@ def run_reprocessing(
     logger.info("Found %d filing(s) to reprocess.", len(filings))
 
     per_filing = []
-    totals = {"found": 0, "inserted": 0, "versioned": 0, "unchanged": 0, "errors": 0}
+    totals = {"found": 0, "inserted": 0, "versioned": 0, "unchanged": 0, "errors": 0, "superseded": 0}
 
     for i, filing in enumerate(filings):
         if (i + 1) % 10 == 0:
