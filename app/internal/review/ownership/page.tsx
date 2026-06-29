@@ -1,4 +1,10 @@
-import { getOwnershipReviewData } from "@/lib/ownership-review";
+import {
+  getOwnershipReviewData,
+  formatReviewDate,
+  labelReviewStatus,
+  labelEventType,
+  labelRelationshipType,
+} from "@/lib/ownership-review";
 import { OwnershipReviewControls } from "@/components/internal/OwnershipReviewControls";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +15,18 @@ export const metadata = {
 
 function pct(v: number | null): string {
   return v == null ? "—" : `${v}%`;
+}
+
+/** Small status pill showing a readable label; raw value in the tooltip. */
+function StatusPill({ value }: { value: string }) {
+  return (
+    <span
+      title={value}
+      className="inline-block rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px] text-muted/80"
+    >
+      {labelReviewStatus(value)}
+    </span>
+  );
 }
 
 function Th({ children }: { children: React.ReactNode }) {
@@ -82,7 +100,7 @@ export default async function OwnershipReviewPage() {
                   <Td className="max-w-xs text-[11px] text-muted/70">
                     {e.recommendation ? e.recommendation.reason : "no change recommended"}
                   </Td>
-                  <Td><code className="text-[11px] text-muted/70">{e.review_status}</code></Td>
+                  <Td><StatusPill value={e.review_status} /></Td>
                   <Td>
                     <OwnershipReviewControls
                       kind="entity"
@@ -111,7 +129,8 @@ export default async function OwnershipReviewPage() {
                 <Th>Declarant</Th>
                 <Th>Voting %</Th>
                 <Th>Event type</Th>
-                <Th>Event / Pub date</Th>
+                <Th>Effective</Th>
+                <Th>Published</Th>
                 <Th>Direct/Indirect</Th>
                 <Th>Source</Th>
                 <Th>Status</Th>
@@ -133,16 +152,23 @@ export default async function OwnershipReviewPage() {
                   </Td>
                   <Td>{pct(ev.voting_pct_after)}</Td>
                   <Td>
-                    <code className="text-[11px] text-muted/80">{ev.event_type}</code>
+                    <span title={`raw: ${ev.event_type}`} className="text-muted/90">
+                      {labelEventType(ev.event_type)}
+                    </span>
                     {ev.directionUndetermined && (
-                      <div className="mt-0.5 inline-block rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300">
-                        {ev.ambiguityNote}
+                      <div
+                        title={`raw event_type: ${ev.event_type}`}
+                        className="mt-0.5 inline-block rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+                      >
+                        Direction not determined from source
                       </div>
                     )}
                   </Td>
-                  <Td className="text-[11px] text-muted/70">
-                    {ev.event_date ?? "—"}
-                    <div className="text-muted/40">pub {ev.publication_date ?? "—"}</div>
+                  <Td className="whitespace-nowrap text-[11px] text-muted/80" >
+                    <span title={ev.event_date ?? ""}>{formatReviewDate(ev.event_date)}</span>
+                  </Td>
+                  <Td className="whitespace-nowrap text-[11px] text-muted/60">
+                    <span title={ev.publication_date ?? ""}>{formatReviewDate(ev.publication_date)}</span>
                   </Td>
                   <Td><code className="text-[11px] text-muted/70">{ev.direct_or_indirect ?? "—"}</code></Td>
                   <Td>
@@ -159,7 +185,7 @@ export default async function OwnershipReviewPage() {
                       <span className="text-muted/40">—</span>
                     )}
                   </Td>
-                  <Td><code className="text-[11px] text-muted/70">{ev.review_status}</code></Td>
+                  <Td><StatusPill value={ev.review_status} /></Td>
                   <Td><OwnershipReviewControls kind="event" id={ev.id} /></Td>
                 </tr>
               ))}
@@ -194,7 +220,9 @@ export default async function OwnershipReviewPage() {
                 <tr key={r.id} className="border-t border-white/[0.05]">
                   <Td className="font-medium">{r.subject_name}</Td>
                   <Td>
-                    <code className="text-[11px] text-muted/80">{r.relationship_type}</code>
+                    <span title={`raw: ${r.relationship_type}`} className="text-muted/90">
+                      {labelRelationshipType(r.relationship_type)}
+                    </span>
                     {r.direct_or_indirect && (
                       <span className="ml-1 text-[10px] text-muted/50">({r.direct_or_indirect})</span>
                     )}
@@ -214,7 +242,7 @@ export default async function OwnershipReviewPage() {
                       <span className="text-muted/40">—</span>
                     )}
                   </Td>
-                  <Td><code className="text-[11px] text-muted/70">{r.review_status}</code></Td>
+                  <Td><StatusPill value={r.review_status} /></Td>
                   <Td><OwnershipReviewControls kind="relationship" id={r.id} /></Td>
                 </tr>
               ))}

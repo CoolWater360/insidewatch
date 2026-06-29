@@ -1,21 +1,27 @@
 /**
- * Tests for the Phase 17B.6 Ownership Review Queue:
- *   - pure recommendation logic (lib/ownership-review)
- *   - server-side mutation actions (lib/ownership-review-actions)
+ * Tests for the Phase 17B.6 / 17B.7 Ownership Review Queue:
+ *   - pure recommendation logic + readable labels + compact dates
+ *     (lib/ownership-review)
+ *   - server-side mutation actions routing through atomic audit RPCs
+ *     (lib/ownership-review-actions)
+ *   - migration 020 static content (audit hardening)
  *
- * (Route authorization/validation is covered in ownership-review-route.test.ts,
- * which mocks the action module — kept separate so these tests exercise the
- * REAL action functions.)
- *
+ * (Route authorization/validation is covered in ownership-review-route.test.ts.)
  * The Supabase client is mocked throughout — no network, no DB.
  */
 
+import * as fs from "fs";
+import * as path from "path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   recommendEntityType,
   isEntityType,
   ENTITY_TYPES,
+  labelReviewStatus,
+  labelEventType,
+  labelRelationshipType,
+  formatReviewDate,
 } from "../../lib/ownership-review";
 import {
   reviewEntity,
@@ -63,107 +69,173 @@ describe("isEntityType", () => {
   });
 });
 
-// ─── Mutation actions ──────────────────────────────────────────────────────────
+// ─── Readable label mapping (Part A) ───────────────────────────────────────────
 
-interface Capture {
-  table?: string;
-  payload?: Record<string, unknown>;
-  eqs: Array<[string, unknown]>;
+describe("readable labels", () => {
+  it("maps review statuses", () => {
+    expect(labelReviewStatus("pending_review")).toBe("Pending review");
+    expect(labelReviewStatus("confirmed")).toBe("Confirmed");
+    expect(labelReviewStatus("rejected")).toBe("Rejected");
+  });
+
+  it("maps event types incl. the ambiguous 'other'", () => {
+    expect(labelEventType("initial_disclosure")).toBe("Initial disclosure");
+    expect(labelEventType("other")).toBe("Other / classification pending");
+    expect(labelEventType("threshold_crossing_up")).toBe("Threshold crossing (up)");
+  });
+
+  it("maps relationship types", () => {
+    expect(labelRelationshipType("controls")).toBe("Controls");
+    expect(labelRelationshipType("beneficially_owns")).toBe("Beneficially owns");
+  });
+
+  it("humanises unknown values rather than showing raw snake_case", () => {
+    expect(labelEventType("brand_new_type")).toBe("Brand new type");
+    expect(labelReviewStatus("")).toBe("—");
+  });
+});
+
+// ─── Compact date formatting (Part A) ──────────────────────────────────────────
+
+describe("formatReviewDate", () => {
+  it("formats ISO dates compactly without timezone drift", () => {
+    expect(formatReviewDate("2026-04-28")).toBe("28 Apr 2026");
+    expect(formatReviewDate("2026-05-06")).toBe("6 May 2026");
+    expect(formatReviewDate("2025-09-12")).toBe("12 Sep 2025");
+  });
+
+  it("accepts a full timestamp and uses the date part", () => {
+    expect(formatReviewDate("2026-06-03T00:00:00+00:00")).toBe("3 Jun 2026");
+  });
+
+  it("returns an em dash for null/invalid", () => {
+    expect(formatReviewDate(null)).toBe("—");
+    expect(formatReviewDate("")).toBe("—");
+    expect(formatReviewDate("not-a-date")).toBe("—");
+  });
+});
+
+// ─── Mutation actions route through atomic audit RPCs ──────────────────────────
+
+interface RpcCapture {
+  fn?: string;
+  params?: Record<string, unknown>;
+  calls: number;
 }
 
-function captureDb(error: { message: string } | null = null): {
+function rpcDb(error: { message: string } | null = null): {
   db: SupabaseClient;
-  cap: Capture;
+  cap: RpcCapture;
 } {
-  const cap: Capture = { eqs: [] };
-  const chain: Record<string, unknown> = {};
-  chain.update = jest.fn((payload: Record<string, unknown>) => {
-    cap.payload = payload;
-    return chain;
-  });
-  chain.eq = jest.fn((col: string, val: unknown) => {
-    cap.eqs.push([col, val]);
-    return chain;
-  });
-  // Make the chain awaitable (resolves like a PostgREST builder).
-  (chain as { then: unknown }).then = (
-    resolve: (v: { error: unknown }) => void
-  ) => Promise.resolve({ error }).then(resolve);
+  const cap: RpcCapture = { calls: 0 };
   const db = {
-    from: jest.fn((t: string) => {
-      cap.table = t;
-      return chain;
+    rpc: jest.fn((fn: string, params: Record<string, unknown>) => {
+      cap.fn = fn;
+      cap.params = params;
+      cap.calls += 1;
+      return Promise.resolve({ data: null, error });
     }),
   } as unknown as SupabaseClient;
   return { db, cap };
 }
 
 describe("reviewEntity", () => {
-  it("approve → review_status confirmed on entities", async () => {
-    const { db, cap } = captureDb();
+  it("approve → internal_review_ownership_entity RPC with decision=approve", async () => {
+    const { db, cap } = rpcDb();
     const r = await reviewEntity(db, 1, "approve", "tester");
     expect(r.ok).toBe(true);
-    expect(cap.table).toBe("entities");
-    expect(cap.payload!.review_status).toBe("confirmed");
-    expect(cap.payload!.entity_type).toBeUndefined(); // raw fact untouched
-    expect(cap.eqs).toContainEqual(["id", 1]);
+    expect(cap.fn).toBe("internal_review_ownership_entity");
+    expect(cap.params).toEqual({ p_entity_id: 1, p_decision: "approve", p_actor: "tester" });
   });
 
-  it("reject → review_status rejected", async () => {
-    const { db, cap } = captureDb();
+  it("reject → decision=reject", async () => {
+    const { db, cap } = rpcDb();
     await reviewEntity(db, 2, "reject", "tester");
-    expect(cap.payload!.review_status).toBe("rejected");
+    expect(cap.params!.p_decision).toBe("reject");
   });
 
-  it("surfaces DB errors", async () => {
-    const { db } = captureDb({ message: "boom" });
-    const r = await reviewEntity(db, 1, "approve", "tester");
-    expect(r).toEqual({ ok: false, error: "boom" });
+  it("surfaces RPC errors", async () => {
+    const { db } = rpcDb({ message: "boom" });
+    expect(await reviewEntity(db, 1, "approve", "tester")).toEqual({ ok: false, error: "boom" });
   });
 });
 
 describe("setEntityType", () => {
-  it("rejects an invalid type without touching the DB", async () => {
-    const { db, cap } = captureDb();
+  it("rejects an invalid type WITHOUT calling any RPC (writes nothing)", async () => {
+    const { db, cap } = rpcDb();
     const r = await setEntityType(db, 1, "not-a-type", "tester");
     expect(r.ok).toBe(false);
-    expect(cap.table).toBeUndefined();
+    expect(cap.calls).toBe(0);
+    expect((db.rpc as jest.Mock)).not.toHaveBeenCalled();
   });
 
-  it("applies a valid type and marks confirmed", async () => {
-    const { db, cap } = captureDb();
+  it("applies a valid type via internal_set_ownership_entity_type", async () => {
+    const { db, cap } = rpcDb();
     const r = await setEntityType(db, 3, "company", "tester");
     expect(r.ok).toBe(true);
-    expect(cap.table).toBe("entities");
-    expect(cap.payload!.entity_type).toBe("company");
-    expect(cap.payload!.review_status).toBe("confirmed");
+    expect(cap.fn).toBe("internal_set_ownership_entity_type");
+    expect(cap.params).toEqual({ p_entity_id: 3, p_entity_type: "company", p_actor: "tester" });
   });
 });
 
 describe("reviewOwnershipEvent", () => {
-  it("writes reviewed_by/reviewed_at and only touches current rows", async () => {
-    const { db, cap } = captureDb();
-    const r = await reviewOwnershipEvent(db, 7, "approve", "tester");
-    expect(r.ok).toBe(true);
-    expect(cap.table).toBe("ownership_events");
-    expect(cap.payload!.review_status).toBe("confirmed");
-    expect(cap.payload!.reviewed_by).toBe("tester");
-    expect(cap.payload!.reviewed_at).toBeDefined();
-    expect(cap.eqs).toContainEqual(["id", 7]);
-    expect(cap.eqs).toContainEqual(["is_current", true]);
-    // raw facts not edited
-    expect(cap.payload!.voting_pct_after).toBeUndefined();
-    expect(cap.payload!.event_type).toBeUndefined();
+  it("routes to internal_review_ownership_event", async () => {
+    const { db, cap } = rpcDb();
+    await reviewOwnershipEvent(db, 7, "approve", "tester");
+    expect(cap.fn).toBe("internal_review_ownership_event");
+    expect(cap.params).toEqual({ p_event_id: 7, p_decision: "approve", p_actor: "tester" });
   });
 });
 
 describe("reviewRelationship", () => {
-  it("writes reviewed_by/reviewed_at on entity_relationships", async () => {
-    const { db, cap } = captureDb();
+  it("routes to internal_review_ownership_relationship", async () => {
+    const { db, cap } = rpcDb();
     await reviewRelationship(db, 9, "reject", "tester");
-    expect(cap.table).toBe("entity_relationships");
-    expect(cap.payload!.review_status).toBe("rejected");
-    expect(cap.payload!.reviewed_by).toBe("tester");
-    expect(cap.eqs).toContainEqual(["is_current", true]);
+    expect(cap.fn).toBe("internal_review_ownership_relationship");
+    expect(cap.params).toEqual({ p_relationship_id: 9, p_decision: "reject", p_actor: "tester" });
+  });
+});
+
+// ─── Migration 020 static content (audit hardening) ────────────────────────────
+
+describe("migration 020 — ownership review audit hardening", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../../db/migrations/020_ownership_review_audit.sql"),
+    "utf-8"
+  );
+
+  it("adds reviewer attribution columns to entities", () => {
+    expect(sql).toMatch(/ALTER TABLE entities ADD COLUMN IF NOT EXISTS reviewed_by/);
+    expect(sql).toMatch(/ALTER TABLE entities ADD COLUMN IF NOT EXISTS reviewed_at/);
+  });
+
+  it("extends internal_audit_log entity_type to accept the three ownership kinds", () => {
+    expect(sql).toContain("'ownership_entity'");
+    expect(sql).toContain("'ownership_event'");
+    expect(sql).toContain("'ownership_relationship'");
+    // existing values preserved
+    expect(sql).toContain("'transaction'");
+    expect(sql).toContain("'filing'");
+    expect(sql).toContain("'unmatched_issuer'");
+  });
+
+  it("defines the four atomic ownership review RPCs", () => {
+    for (const fn of [
+      "internal_review_ownership_entity",
+      "internal_set_ownership_entity_type",
+      "internal_review_ownership_event",
+      "internal_review_ownership_relationship",
+    ]) {
+      expect(sql).toContain(`CREATE OR REPLACE FUNCTION ${fn}`);
+    }
+  });
+
+  it("each RPC writes an internal_audit_log row (atomic audit)", () => {
+    const inserts = sql.match(/INSERT INTO internal_audit_log/g) ?? [];
+    expect(inserts.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("does NOT backfill historical reviewer data", () => {
+    expect(sql).not.toMatch(/UPDATE entities\s+SET\s+reviewed_by/i);
   });
 });

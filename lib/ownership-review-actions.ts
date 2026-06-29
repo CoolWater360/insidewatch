@@ -1,5 +1,6 @@
 /**
- * Phase 17B.6 — server-side mutation actions for the Ownership Review Queue.
+ * Phase 17B.6 / 17B.7 — server-side mutation actions for the Ownership Review
+ * Queue.
  *
  * Service-role only. Each action is EXPLICIT, named, and limited to:
  *   - review-status changes (approve → confirmed, reject → rejected), or
@@ -8,13 +9,13 @@
  * Raw source facts (percentages, dates, names, source_url, hashes) are NEVER
  * edited here.
  *
- * Auditability: ownership_events and entity_relationships carry reviewed_by /
- * reviewed_at columns (migrations 017/018) — these are written on every action
- * so the who/when/state is recorded in-row. The entities table has no
- * reviewed_by/reviewed_at columns (migration 016); for entities only
- * review_status + updated_at are written. The central internal_audit_log table
- * is NOT used because its entity_type CHECK excludes ownership types — see
- * docs/ownership-review-ui.md ("Audit gap"). No broad new audit system is added.
+ * Atomicity & audit (Phase 17B.7): every action calls a Postgres RPC
+ * (db/migrations/020_ownership_review_audit.sql) that performs the business
+ * UPDATE and the internal_audit_log INSERT in one PL/pgSQL transaction —
+ * mirroring db/migrations/009_internal_rpc.sql. If either statement fails the
+ * whole call rolls back; no partial state, no un-audited change. The RPCs also
+ * write reviewed_by / reviewed_at on entities, ownership_events, and
+ * entity_relationships.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -25,8 +26,9 @@ export interface ActionResult {
   error?: string;
 }
 
-function nowUtc(): string {
-  return new Date().toISOString();
+function fromRpc(rpcError: { message: string } | null): ActionResult {
+  if (rpcError) return { ok: false, error: rpcError.message };
+  return { ok: true };
 }
 
 // ─── Entities ───────────────────────────────────────────────────────────────
@@ -37,14 +39,12 @@ export async function reviewEntity(
   decision: "approve" | "reject",
   actor: string
 ): Promise<ActionResult> {
-  const review_status = decision === "approve" ? "confirmed" : "rejected";
-  const { error } = await db
-    .from("entities")
-    .update({ review_status, updated_at: nowUtc() })
-    .eq("id", entityId);
-  // actor is recorded centrally via getActor(); entities has no reviewed_by col.
-  void actor;
-  return error ? { ok: false, error: error.message } : { ok: true };
+  const { error } = await db.rpc("internal_review_ownership_entity", {
+    p_entity_id: entityId,
+    p_decision: decision,
+    p_actor: actor,
+  });
+  return fromRpc(error);
 }
 
 /**
@@ -60,16 +60,12 @@ export async function setEntityType(
   if (!isEntityType(newType)) {
     return { ok: false, error: `invalid entity_type: ${newType}` };
   }
-  void actor;
-  const { error } = await db
-    .from("entities")
-    .update({
-      entity_type: newType,
-      review_status: "confirmed",
-      updated_at: nowUtc(),
-    })
-    .eq("id", entityId);
-  return error ? { ok: false, error: error.message } : { ok: true };
+  const { error } = await db.rpc("internal_set_ownership_entity_type", {
+    p_entity_id: entityId,
+    p_entity_type: newType,
+    p_actor: actor,
+  });
+  return fromRpc(error);
 }
 
 // ─── Ownership events ─────────────────────────────────────────────────────────
@@ -80,19 +76,12 @@ export async function reviewOwnershipEvent(
   decision: "approve" | "reject",
   actor: string
 ): Promise<ActionResult> {
-  const review_status = decision === "approve" ? "confirmed" : "rejected";
-  const now = nowUtc();
-  const { error } = await db
-    .from("ownership_events")
-    .update({
-      review_status,
-      reviewed_by: actor,
-      reviewed_at: now,
-      updated_at: now,
-    })
-    .eq("id", eventId)
-    .eq("is_current", true);
-  return error ? { ok: false, error: error.message } : { ok: true };
+  const { error } = await db.rpc("internal_review_ownership_event", {
+    p_event_id: eventId,
+    p_decision: decision,
+    p_actor: actor,
+  });
+  return fromRpc(error);
 }
 
 // ─── Entity relationships ──────────────────────────────────────────────────────
@@ -103,17 +92,10 @@ export async function reviewRelationship(
   decision: "approve" | "reject",
   actor: string
 ): Promise<ActionResult> {
-  const review_status = decision === "approve" ? "confirmed" : "rejected";
-  const now = nowUtc();
-  const { error } = await db
-    .from("entity_relationships")
-    .update({
-      review_status,
-      reviewed_by: actor,
-      reviewed_at: now,
-      updated_at: now,
-    })
-    .eq("id", relationshipId)
-    .eq("is_current", true);
-  return error ? { ok: false, error: error.message } : { ok: true };
+  const { error } = await db.rpc("internal_review_ownership_relationship", {
+    p_relationship_id: relationshipId,
+    p_decision: decision,
+    p_actor: actor,
+  });
+  return fromRpc(error);
 }

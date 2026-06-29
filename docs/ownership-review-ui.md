@@ -57,30 +57,50 @@ Raw source facts (percentages, dates, names, source URL, hashes, event type) are
 - No public routes, public views, or RLS policies are changed. `context_sources`
   internal columns (`storage_path`, `raw_text`) are never selected or rendered.
 
-## Auditability — and the documented gap
+## Auditability (hardened in Phase 17B.7 — migration 020)
 
-Per-row review fields are written on every action:
+The review-audit gap is now closed by **`db/migrations/020_ownership_review_audit.sql`**:
 
-- `ownership_events` and `entity_relationships` have `reviewed_by` + `reviewed_at`
-  (migrations 018 / 017) — both are set, recording **who** and **when** alongside
-  the new `review_status`.
-- `entities` (migration 016) has **no** `reviewed_by` / `reviewed_at` columns, so
-  entity reviews record `review_status` + `updated_at` only — the acting operator
-  is the shared-admin actor (`INTERNAL_ACTOR_LABEL`), not stored per entity row.
+1. **`entities.reviewed_by` / `reviewed_at`** added (mirroring `ownership_events`
+   and `entity_relationships`), so entity reviews record who/when per row.
+2. **`internal_audit_log.entity_type` CHECK** extended to also accept
+   `ownership_entity | ownership_event | ownership_relationship`. All existing
+   values and rows are unaffected.
+3. **Atomic review RPCs** (`internal_review_ownership_entity`,
+   `internal_set_ownership_entity_type`, `internal_review_ownership_event`,
+   `internal_review_ownership_relationship`) perform the business `UPDATE` and the
+   `internal_audit_log` INSERT in one PL/pgSQL transaction — mirroring
+   `db/migrations/009_internal_rpc.sql`. The server actions in
+   `lib/ownership-review-actions.ts` call these via `db.rpc(...)`; on any error
+   the whole call rolls back, so there is never an un-audited change.
 
-**Minimal gap (not closed in this phase):** the central `internal_audit_log`
-table (migration 008) has a CHECK constraint limiting `entity_type` to
-`transaction | filing | unmatched_issuer`, so ownership records cannot be written
-to it without a schema change. Per the phase instruction, no broad new audit
-system was added. Closing the gap later would be a small, additive migration:
+No existing audit-log checks, FKs, RPCs, or review workflows were modified. No
+broad new audit system was introduced.
 
-1. extend the `internal_audit_log.entity_type` CHECK to include
-   `entity | ownership_event | entity_relationship`; and
-2. add `reviewed_by` / `reviewed_at` columns to `entities` (optional); and
-3. route ownership review mutations through audit-writing RPCs mirroring
-   `db/migrations/009_internal_rpc.sql` so the UPDATE + audit INSERT are atomic.
+### Apply note
 
-This is documented here and intentionally **not** implemented now.
+Migrations in this project are applied manually (Supabase → SQL Editor). Until
+migration 020 is applied to a given environment, the review **display** works
+unchanged, but the approve/reject/set-type **mutations** will error (the RPCs do
+not yet exist). This is intentional — Phase 17B.7 ships the migration and routes
+the actions through it; the operator applies the migration when ready.
+
+### Historical limitation (no backfill)
+
+Reviewer attribution is **not** backfilled for review actions taken before
+migration 020 / the RPC path existed:
+
+- entities **3** and **5** — entity-type corrections approved in Phase 17B.5
+  (2026-06-29 ~21:57, via the Python `scraper.ownership.review` CLI);
+- entities **1, 2, 4, 6** — approved by the operator in Phase 17B.6
+  (2026-06-29 ~22:15, via the first version of this UI, which used direct
+  `UPDATE`s without an audit row).
+
+These rows are `confirmed` with `updated_at` set but no `reviewed_by` /
+`reviewed_at` and no `internal_audit_log` entry. This is intentional — no fake
+reviewer data is fabricated retroactively. All **future** ownership review
+actions (events and relationships, all still `pending_review`, plus any future
+entities) are fully attributed and audited via the RPCs.
 
 ## Out of scope (unchanged)
 

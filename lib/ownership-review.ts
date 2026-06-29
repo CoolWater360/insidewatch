@@ -30,6 +30,79 @@ export function isEntityType(v: string): v is EntityType {
   return (ENTITY_TYPES as readonly string[]).includes(v);
 }
 
+// ─── Human-readable display helpers (pure; exported for testing) ────────────────
+
+export const REVIEW_STATUS_LABELS: Record<string, string> = {
+  pending_review: "Pending review",
+  confirmed: "Confirmed",
+  rejected: "Rejected",
+};
+
+export const EVENT_TYPE_LABELS: Record<string, string> = {
+  initial_disclosure: "Initial disclosure",
+  threshold_crossing_up: "Threshold crossing (up)",
+  threshold_crossing_down: "Threshold crossing (down)",
+  change_in_nature: "Change in nature",
+  cancellation: "Cancellation",
+  pledge: "Pledge",
+  pledge_release: "Pledge release",
+  other: "Other / classification pending",
+};
+
+export const RELATIONSHIP_TYPE_LABELS: Record<string, string> = {
+  controls: "Controls",
+  beneficially_owns: "Beneficially owns",
+  shareholder: "Shareholder",
+  related_party: "Related party",
+  concert_party: "Concert party",
+  nominee_for: "Nominee for",
+  trustee_of: "Trustee of",
+  beneficiary_of: "Beneficiary of",
+  family_relation: "Family relation",
+  other: "Other",
+};
+
+/** Humanise a raw snake_case value when no explicit label is mapped. */
+function humanize(raw: string): string {
+  if (!raw) return "—";
+  const s = raw.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+export function labelReviewStatus(raw: string): string {
+  return REVIEW_STATUS_LABELS[raw] ?? humanize(raw);
+}
+
+export function labelEventType(raw: string): string {
+  return EVENT_TYPE_LABELS[raw] ?? humanize(raw);
+}
+
+export function labelRelationshipType(raw: string): string {
+  return RELATIONSHIP_TYPE_LABELS[raw] ?? humanize(raw);
+}
+
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * Format an ISO date (YYYY-MM-DD or full timestamp) as a compact, readable,
+ * timezone-stable string, e.g. "28 Apr 2026" / "6 May 2026". Returns "—" for
+ * null/invalid. Parsed from the date parts directly so it is deterministic
+ * across locales/ICU versions and free of timezone drift.
+ */
+export function formatReviewDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return "—";
+  const year = m[1];
+  const monthIdx = parseInt(m[2], 10) - 1;
+  const day = parseInt(m[3], 10);
+  if (monthIdx < 0 || monthIdx > 11 || day < 1 || day > 31) return "—";
+  return `${day} ${MONTH_ABBR[monthIdx]} ${year}`;
+}
+
 // Organisation indicators used ONLY to flag a 'natural_person' that is clearly
 // an organisation, mirroring scraper/ownership/review.py. Produces a
 // recommendation + reason; never mutates data.
