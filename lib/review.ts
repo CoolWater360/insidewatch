@@ -227,6 +227,50 @@ export async function getUnmatchedIssuers(
   };
 }
 
+// ─── Extended transaction type (workspace) ────────────────────────────────────
+
+export interface ExtendedReviewTransaction extends ReviewTransaction {
+  filed_date: string | null;
+  parser_version: string | null;
+  classification_confidence: number | null;
+  classification_overridden_by: string | null;
+  classification_overridden_at: string | null;
+}
+
+/**
+ * Load up to `limit` pending transactions with provenance fields for the
+ * three-pane review workspace. Does NOT select review_notes (migration 007 guard).
+ */
+export async function getWorkspaceTransactions(
+  limit = 200
+): Promise<ExtendedReviewTransaction[]> {
+  const db = getSupabaseServer();
+
+  const { data, error } = await db
+    .from("transactions")
+    .select(
+      "id, transaction_date, filed_date, direction, transaction_type, economic_intent," +
+      " quantity, unit_price, total_value, currency, needs_review, review_status," +
+      " review_reason, extraction_confidence, classification_confidence," +
+      " classification_rationale, raw_nature_text, classification_override," +
+      " classification_overridden_by, classification_overridden_at, isin," +
+      " source_url, source_filing_id, parser_version," +
+      " companies(id, name), insiders(full_name, role)"
+    )
+    .eq("needs_review", true)
+    .or("review_status.is.null,review_status.in.(pending_review,under_review)")
+    .order("extraction_confidence", { ascending: true, nullsFirst: true })
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    console.error("getWorkspaceTransactions error:", error.message);
+    return [];
+  }
+
+  return (data ?? []) as unknown as ExtendedReviewTransaction[];
+}
+
 // ─── Filing detail ────────────────────────────────────────────────────────────
 
 export async function getFilingById(id: number): Promise<FilingDetail | null> {
