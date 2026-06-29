@@ -4,21 +4,10 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useState } from "react"
 
-// ─── Inline SVG icon ──────────────────────────────────────────────────────────
-
 function Icon({ path, className = "" }: { path: string | readonly string[]; className?: string }) {
   const paths: readonly string[] = Array.isArray(path) ? path : [path]
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={`h-4 w-4 shrink-0 ${className}`}
-    >
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" className={`h-4 w-4 shrink-0 ${className}`}>
       {paths.map((d, i) => <path key={i} d={d} />)}
     </svg>
   )
@@ -44,23 +33,27 @@ const ICONS = {
   close:        "M6 18L18 6M6 6l12 12",
   plus:         "M12 4v16m8-8H4",
   support:      "M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+  health:       ["M22 12h-4l-3 9L9 3l-3 9H2"],
+  arrow:        "M17 8l4 4m0 0l-4 4m4-4H3",
 } as const
 
 type IconKey = keyof typeof ICONS
 
-// ─── Nav item (live, active-state aware) ──────────────────────────────────────
+// ─── Live nav item ─────────────────────────────────────────────────────────────
 
 function NavItem({
   href,
   label,
   icon,
   exact = false,
+  badge,
   pathname,
 }: {
   href: string
   label: string
   icon: IconKey
   exact?: boolean
+  badge?: number
   pathname: string
 }) {
   const isActive = exact
@@ -70,22 +63,30 @@ function NavItem({
   return (
     <Link
       href={href}
-      className={`group flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+      className={`group relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium transition-colors ${
         isActive
-          ? "bg-navy-600 text-brand-blue"
+          ? "bg-navy-700 text-brand-blue"
           : "text-muted hover:bg-white/[0.05] hover:text-[#E8EDF7]"
       }`}
     >
+      {isActive && (
+        <span className="absolute left-0 top-1/2 h-[18px] w-0.5 -translate-y-1/2 rounded-r-full bg-brand-blue" />
+      )}
       <Icon
         path={ICONS[icon]}
-        className={isActive ? "text-brand-blue" : "text-muted/70 group-hover:text-[#E8EDF7]"}
+        className={isActive ? "text-brand-blue" : "text-muted/60 group-hover:text-[#E8EDF7]"}
       />
-      {label}
+      <span className="truncate">{label}</span>
+      {badge !== undefined && badge > 0 && (
+        <span className="ml-auto shrink-0 rounded-full bg-signal/20 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-signal">
+          {badge > 99 ? "99+" : badge}
+        </span>
+      )}
     </Link>
   )
 }
 
-// ─── Planned item (dimmed, navigates to placeholder) ─────────────────────────
+// ─── Planned item ─────────────────────────────────────────────────────────────
 
 function PlannedItem({
   href,
@@ -99,14 +100,24 @@ function PlannedItem({
   return (
     <Link
       href={href}
-      className="group flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted/40 transition-colors hover:bg-white/[0.03] hover:text-muted/60"
+      className="group flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium text-muted/35 transition-colors hover:bg-white/[0.02] hover:text-muted/55"
     >
-      <Icon path={ICONS[icon]} className="text-muted/30 group-hover:text-muted/50" />
+      <Icon path={ICONS[icon]} className="text-muted/25 group-hover:text-muted/40" />
       <span className="truncate">{label}</span>
-      <span className="ml-auto shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted/30 ring-1 ring-muted/20">
+      <span className="ml-auto shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted/25 ring-1 ring-muted/15">
         Presto
       </span>
     </Link>
+  )
+}
+
+// ─── Section label ────────────────────────────────────────────────────────────
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mt-4 mb-1 px-2.5 text-[9px] font-semibold uppercase tracking-widest text-muted/35">
+      {children}
+    </p>
   )
 }
 
@@ -130,22 +141,16 @@ export function Sidebar() {
 
       {/* Mobile backdrop */}
       {mobileOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
-          onClick={() => setMobileOpen(false)}
-        />
+        <div className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setMobileOpen(false)} />
       )}
 
       {/* Sidebar panel */}
-      <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r border-white/[0.07] bg-navy-900 transition-transform duration-200 ease-out lg:translate-x-0 ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
-      >
-        {/* Logo */}
-        <div className="flex h-14 shrink-0 flex-col justify-center px-4">
-          <span className="text-sm font-bold tracking-tight text-[#E8EDF7]">InsideWatch</span>
-          <span className="text-[10px] font-medium tracking-wide text-muted/60">
+      <aside className={`fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r border-white/[0.06] bg-navy-900 transition-transform duration-200 ease-out lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
+
+        {/* Logo block */}
+        <div className="flex h-[52px] shrink-0 flex-col justify-center px-4">
+          <span className="text-[15px] font-semibold tracking-tight text-[#E8EDF7]">InsideWatch</span>
+          <span className="mt-0.5 text-[10px] font-normal tracking-wide text-muted/55">
             Institutional Intelligence Console
           </span>
         </div>
@@ -154,58 +159,75 @@ export function Sidebar() {
         <div className="px-3 pb-3">
           <button
             type="button"
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-blue px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-90"
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-blue px-3 py-[7px] text-[13px] font-semibold text-white shadow-sm transition-opacity hover:opacity-90"
           >
-            <Icon path={ICONS.plus} className="h-3 w-3" />
+            <Icon path={ICONS.plus} className="h-3.5 w-3.5" />
             Nuova Analisi
           </button>
         </div>
 
-        <div className="mx-3 h-px bg-white/[0.07]" />
+        <div className="mx-3 h-px bg-white/[0.06]" />
 
         {/* Nav */}
-        <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
-          <p className="mb-1 mt-1 px-2.5 text-[9px] font-semibold uppercase tracking-widest text-muted/40">
-            Operativo
-          </p>
+        <nav className="flex-1 overflow-y-auto px-3 py-1">
+
+          <SectionLabel>Dashboard</SectionLabel>
           <NavItem href="/internal"              label="Dashboard"           icon="dashboard"     exact pathname={pathname} />
+
+          <SectionLabel>Intelligence</SectionLabel>
           <NavItem href="/internal/signals"      label="Segnali & Contesto"  icon="signals"             pathname={pathname} />
           <NavItem href="/internal/review"       label="Coda di Revisione"   icon="review"              pathname={pathname} />
           <NavItem href="/internal/transactions" label="Transazioni"          icon="transactions"        pathname={pathname} />
-          <NavItem href="/internal/filings"      label="Filing"              icon="filings"             pathname={pathname} />
+
+          <SectionLabel>Emittenti</SectionLabel>
           <NavItem href="/internal/issuers"      label="Emittenti"           icon="issuers"             pathname={pathname} />
+
+          <SectionLabel>Audit</SectionLabel>
+          <NavItem href="/internal/filings"      label="Filing"              icon="filings"             pathname={pathname} />
+
+          <SectionLabel>Operativo</SectionLabel>
           <NavItem href="/internal/quality"      label="Qualità Dati"        icon="quality"             pathname={pathname} />
           <NavItem href="/internal/operations"   label="Operazioni"          icon="operations"          pathname={pathname} />
 
-          <div className="my-2 h-px bg-white/[0.07]" />
+          <div className="my-2 h-px bg-white/[0.06]" />
 
-          <p className="mb-1 mt-1 px-2.5 text-[9px] font-semibold uppercase tracking-widest text-muted/40">
-            In Sviluppo
-          </p>
+          <SectionLabel>In Sviluppo</SectionLabel>
           <PlannedItem href="/internal/ownership"        label="Proprietà & Controllo" icon="ownership"   />
           <PlannedItem href="/internal/buybacks"         label="Buyback"               icon="buybacks"    />
           <PlannedItem href="/internal/governance"       label="Governance"            icon="governance"  />
           <PlannedItem href="/internal/corporate-events" label="Azioni Societarie"     icon="corporate"   />
           <PlannedItem href="/internal/entities"         label="Entità & Veicoli"      icon="entities"    />
-          <PlannedItem href="/internal/exports"          label="Esportazioni & API"    icon="exports"     />
+          <PlannedItem href="/internal/exports"          label="Workspace Dati"        icon="exports"     />
         </nav>
 
         {/* Bottom section */}
-        <div className="shrink-0 border-t border-white/[0.07] px-3 py-3 space-y-0.5">
-          <PlannedItem href="/internal/settings" label="Impostazioni" icon="settings" />
+        <div className="shrink-0 border-t border-white/[0.06] px-3 py-2 space-y-0.5">
+          <NavItem href="/internal/settings" label="Impostazioni" icon="settings" pathname={pathname} />
           <a
             href="mailto:support@insidewatch.it"
-            className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted/50 transition-colors hover:bg-white/[0.05] hover:text-muted"
+            className="flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium text-muted/40 transition-colors hover:bg-white/[0.05] hover:text-muted"
           >
-            <Icon path={ICONS.support} className="h-4 w-4 text-muted/40" />
+            <Icon path={ICONS.support} className="h-4 w-4 text-muted/30" />
             Supporto
           </a>
           <Link
             href="/"
-            className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted/40 transition-colors hover:bg-white/[0.05] hover:text-muted/60"
+            className="flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium text-muted/30 transition-colors hover:bg-white/[0.05] hover:text-muted/50"
           >
-            ← Vista pubblica
+            <Icon path={ICONS.arrow} className="h-4 w-4 rotate-180 text-muted/25" />
+            Vista pubblica
           </Link>
+
+          {/* Admin identity chip */}
+          <div className="mt-2 flex items-center gap-2 rounded-md border border-white/[0.06] bg-navy-800/60 px-2.5 py-2">
+            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-blue/20 text-[10px] font-semibold text-brand-blue">
+              A
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-[11px] font-medium text-[#E8EDF7]">Admin</p>
+              <p className="truncate text-[10px] text-muted/40">Operatore</p>
+            </div>
+          </div>
         </div>
       </aside>
     </>
