@@ -69,7 +69,7 @@ export interface UnmatchedIssuer {
   raw_isin: string | null;
   status: string;
   suggestion_issuer_id: number | null;
-  created_at: string;
+  discovered_at: string;
 }
 
 export interface PaginatedResult<T> {
@@ -205,11 +205,11 @@ export async function getUnmatchedIssuers(
   const { data, count, error } = await db
     .from("unmatched_issuers")
     .select(
-      "id, raw_name, raw_isin, status, suggestion_issuer_id, created_at",
+      "id, raw_name, raw_isin, status, suggestion_issuer_id, discovered_at",
       { count: "exact" }
     )
     .eq("status", "pending")
-    .order("created_at", { ascending: false })
+    .order("discovered_at", { ascending: false })
     .range(from, to);
 
   if (error) {

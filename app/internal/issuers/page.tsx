@@ -53,7 +53,7 @@ export default async function UnmatchedIssuersPage({ searchParams }: Props) {
                     )}
                     <div className="text-xs text-muted">
                       Added{" "}
-                      {new Date(issuer.created_at).toLocaleDateString("it-IT")}
+                      {new Date(issuer.discovered_at).toLocaleDateString("it-IT")}
                     </div>
                   </div>
                   <ResolveIssuerForm

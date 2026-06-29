@@ -488,7 +488,7 @@ function IssuerDetail({
         <section>
           <FieldGrid>
             {issuer.raw_isin && <Field label="ISIN grezzo" value={issuer.raw_isin} mono />}
-            <Field label="Aggiunto" value={formatDate(issuer.created_at.split("T")[0])} />
+            <Field label="Scoperto" value={formatDate(issuer.discovered_at.split("T")[0])} />
             {issuer.suggestion_issuer_id && (
               <Field label="Suggerimento" value={`Emittente #${issuer.suggestion_issuer_id}`} />
             )}

@@ -294,7 +294,7 @@ function IssuerItem({
       {issuer.raw_isin && (
         <span className="font-mono text-[10px] text-muted/60">{issuer.raw_isin}</span>
       )}
-      <span className="text-[10px] text-muted/50">{formatDate(issuer.created_at.split("T")[0])}</span>
+      <span className="text-[10px] text-muted/50">{issuer.discovered_at ? formatDate(issuer.discovered_at.split("T")[0]) : null}</span>
     </button>
   );
 }

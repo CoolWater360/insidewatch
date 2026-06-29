@@ -173,7 +173,7 @@ function IssuerEvidence({ issuer }: { issuer: UnmatchedIssuer }) {
         </EvidenceRow>
       )}
       <EvidenceRow label="Aggiunto">
-        <span className="text-[11px] text-muted">{formatDate(issuer.created_at.split("T")[0])}</span>
+        <span className="text-[11px] text-muted">{issuer.discovered_at ? formatDate(issuer.discovered_at.split("T")[0]) : null}</span>
       </EvidenceRow>
       {issuer.suggestion_issuer_id && (
         <EvidenceRow label="Suggerimento ML">
