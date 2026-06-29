@@ -1,0 +1,52 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 1045 >>
+stream
+BT /F1 9 Tf 40 760 Td 12 TL
+(TR-1: Standard form for notification of major holdings) Tj
+T* (SYNTHETIC FICTIONAL TEST DOCUMENT - NOT A REAL CONSOB FILING) Tj
+T* (1. Issuer: ESEMPIO QUOTATA TEST S.P.A.) Tj
+T* (Issuer LEI: 8156000000000000TEST) Tj
+T* (ISIN: IT0000000TEST) Tj
+T* (2. Reason for the notification: Acquisition or disposal of voting rights) Tj
+T* (3. Details of person subject to notification obligation: SOCIETA' ESEMPIO HOLDING SA) Tj
+T* (Submitting entity LEI: 5299000000000000TEST) Tj
+T* (Type of submission: ORIG) Tj
+T* (4. Full name of shareholder\(s\): SOCIETA' ESEMPIO HOLDING SA) Tj
+T* (5. Date on which threshold was crossed or reached: 02/07/2026) Tj
+T* (6. Date on which issuer notified: 03/07/2026) Tj
+T* (7. Resulting situation:) Tj
+T* (% of voting rights attached to shares: 5.120%) Tj
+T* (% of voting rights through financial instruments: 0.000%) Tj
+T* (Total of both: 5.120%) Tj
+T* (Previous notified % of voting rights: 3.880%) Tj
+T* (Nature of holding: indirect through controlled vehicle ESEMPIO NOMINEE SRL) Tj
+ET
+
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1408
+%%EOF

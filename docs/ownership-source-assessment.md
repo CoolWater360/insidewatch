@@ -658,3 +658,55 @@ Do not write the collector until the operator has:
 - Confirmed the revised pilot issuers
 - Manually identified at least one archive notification per pilot issuer
 - Confirmed the URL slug for Mediobanca (or substituted Recordati)
+
+---
+
+## 7. Phase 17B.2 dry-run findings (2026-06-29)
+
+The pilot collector (`scraper/ownership/`) was built and run in **dry-run mode**
+against the three operator-supplied archive URLs. No database writes were made.
+
+### 7.1 Extraction result — PASS
+
+All three target records were parsed correctly from the live pages:
+
+| Issuer | Declarant | Event date | Voting % after | event_type | Named vehicle |
+|--------|-----------|-----------|----------------|-----------|---------------|
+| BRUNELLO CUCINELLI SPA | FMR LLC | 2026-04-28 | 5.588% | `other` (ambiguous prior a)/b)) | none (aggregate) |
+| MEDIOBANCA … S.P.A. | THE GOLDMAN SACHS GROUP, INC. | 2025-09-12 | 3.069% | `initial_disclosure` | 2 (Goldman Sachs International, GS Bank Europe SE) |
+| ITALMOBILIARE SPA | MORGAN STANLEY | 2026-05-25 | 3.001% | `initial_disclosure` | 1 (Morgan Stanley & Co. International plc) |
+
+The Cucinelli aggregate record was correctly held as `other` / `pending_review`
+because its prior notification carries an `a)/b)` split (before% ambiguous) — it
+was **not** silently classified as a crossing.
+
+### 7.2 Blocking finding — issuer master coverage gap
+
+**All three records are BLOCKED from apply.** Exact issuer resolution (ISIN /
+alias / canonical name) returned no match for any of the three:
+
+```
+issuers ilike '%Cucinelli%'     -> []
+issuers ilike '%Mediobanca%'    -> []
+issuers ilike '%Italmobiliare%' -> []
+```
+
+None of the three pilot issuers exist in the `issuers` master yet — they have no
+internal-dealing (MAR Art. 19) coverage in InsideWatch. Because
+`ownership_events.issuer_id` is `NOT NULL`, no row can be written until the
+issuer exists. This is the correct, conservative outcome: the collector refuses
+to invent an issuer or attach the event to a fuzzy match.
+
+### 7.3 Required operator decision before `--apply`
+
+One of:
+
+1. **Seed the three issuers** into the master first
+   (`scraper/issuer_resolver.create_issuer(...)` with canonical name + ISIN +
+   aliases for the CONSOB name forms), then re-run the dry-run to confirm
+   `resolved issuer` is populated; **or**
+2. **Choose pilot issuers already in the master** (issuers that already have
+   internal-dealing filings), and supply their CONSOB archive URLs instead.
+
+Until then, `--apply` would write nothing (every record is blocked), so there is
+no risk in the current state.
