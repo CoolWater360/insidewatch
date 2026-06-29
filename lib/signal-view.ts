@@ -1,18 +1,171 @@
 /**
  * Phase 4 — server-side query helpers for the Signals workspace and Issuer browser.
  *
- * Signal data is computed from lib/signals.ts (uses public anon key).
- * Issuer and security data are fetched via getSupabaseServer() (service-role).
- * Transaction evidence for signal detail uses getSupabaseServer().
+ * All signal computation uses getSupabaseServer() (service-role key) because the
+ * private `transactions` table is not accessible to the anon key. The public
+ * lib/signals.ts functions (which use the anon key) are kept for the public
+ * /api/v1/signals endpoint and are NOT called from here.
+ *
+ * Issuer and security data also use getSupabaseServer().
  */
 
+import { unstable_noStore as noStore } from "next/cache";
 import {
-  getClusterSignalsWithConfidence,
+  scoreClusterConfidence,
+  MECHANICAL_TYPES,
   type ClusterSignalWithConfidence,
   type ClusterInsiderWithRole,
 } from "./signals";
 import { getSupabaseServer } from "./supabase-server";
 import type { PaginatedResult } from "./review";
+
+// ─── Server-side cluster signal computation ───────────────────────────────────
+// Mirrors getClusterSignalsWithConfidence() from lib/signals.ts but uses the
+// service-role client so it can read the private transactions table.
+
+const SENIOR_ROLES_SV = new Set([
+  "ceo", "cfo", "coo", "cto", "chairman", "board_member",
+  "executive_director", "managing_director", "president",
+  "direttore_generale", "amministratore_delegato", "consigliere",
+  "presidente",
+]);
+
+function _isSeniorRoleSv(role: string | null, roleCategory: string | null): boolean {
+  if (!role && !roleCategory) return false;
+  const r  = (role ?? "").toLowerCase().replace(/\s+/g, "_");
+  const rc = (roleCategory ?? "").toLowerCase();
+  return SENIOR_ROLES_SV.has(r) || SENIOR_ROLES_SV.has(rc)
+    || rc === "executive" || rc === "board";
+}
+
+async function getClusterSignalsServer(
+  lookbackDays = 90
+): Promise<ClusterSignalWithConfidence[]> {
+  noStore();
+  const db = getSupabaseServer();
+
+  const since = new Date();
+  since.setDate(since.getDate() - lookbackDays);
+  const sinceStr = since.toISOString().slice(0, 10);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type Row = Record<string, any>;
+
+  const { data, error } = await db
+    .from("transactions")
+    .select(
+      "company_id, transaction_date, quantity, total_value, transaction_type, economic_intent," +
+      " companies(id, name)," +
+      " insiders(full_name, role, role_category)"
+    )
+    .eq("direction", "buy")
+    .gte("transaction_date", sinceStr)
+    .order("company_id")
+    .order("transaction_date");
+
+  if (error || !data) {
+    console.error("getClusterSignalsServer error:", error?.message);
+    return [];
+  }
+
+  const rows = (data as Row[]).filter(
+    (r) => !MECHANICAL_TYPES.has((r.transaction_type as string | null) ?? "")
+  );
+
+  const byCompany = new Map<number, Row[]>();
+  for (const row of rows) {
+    const cid = row.company_id as number;
+    if (!byCompany.has(cid)) byCompany.set(cid, []);
+    byCompany.get(cid)!.push(row);
+  }
+
+  const signals: ClusterSignalWithConfidence[] = [];
+
+  for (const [cid, companyRows] of byCompany) {
+    const sorted = [...companyRows].sort(
+      (a, b) => (a.transaction_date as string).localeCompare(b.transaction_date as string)
+    );
+    const companyInfo = sorted[0].companies as { id: number; name: string } | null;
+    const companyName = companyInfo?.name ?? String(cid);
+
+    let i = 0;
+    while (i < sorted.length) {
+      const startDate  = sorted[i].transaction_date as string;
+      const startMs    = new Date(startDate).getTime();
+
+      let j = i;
+      while (j < sorted.length) {
+        const jMs = new Date(sorted[j].transaction_date as string).getTime();
+        if (jMs - startMs <= 7 * 86_400_000) j++;
+        else break;
+      }
+      const windowTxs = sorted.slice(i, j);
+
+      const insiderMap = new Map<string, ClusterInsiderWithRole>();
+      for (const tx of windowTxs) {
+        const ins = tx.insiders as { full_name: string; role: string | null; role_category: string | null } | null;
+        const rawName = ins?.full_name ?? "Unknown";
+        const k = rawName.toLowerCase().trim();
+        if (!insiderMap.has(k)) {
+          insiderMap.set(k, {
+            name:             rawName,
+            role:             ins?.role ?? null,
+            role_category:    ins?.role_category ?? null,
+            date:             tx.transaction_date as string,
+            quantity:         tx.quantity as number,
+            total_value:      tx.total_value as number,
+            transaction_type: (tx.transaction_type as string | null) ?? null,
+          });
+        } else {
+          const existing = insiderMap.get(k)!;
+          insiderMap.set(k, {
+            ...existing,
+            quantity:    existing.quantity    + (tx.quantity    as number),
+            total_value: existing.total_value + (tx.total_value as number),
+          });
+        }
+      }
+
+      if (insiderMap.size >= 2) {
+        const endDate      = sorted[j - 1].transaction_date as string;
+        const insiderList  = Array.from(insiderMap.values());
+        const totalValue   = windowTxs.reduce((s, t) => s + ((t.total_value as number) || 0), 0);
+        const cashValue    = windowTxs.reduce((s, t) => {
+          const tt = (t.transaction_type as string | null);
+          return MECHANICAL_TYPES.has(tt ?? "") ? s : s + ((t.total_value as number) || 0);
+        }, 0);
+        const seniorCount  = insiderList.filter(
+          (ins) => _isSeniorRoleSv(ins.role, ins.role_category)
+        ).length;
+        const { confidence, rationale } = scoreClusterConfidence(
+          insiderMap.size, seniorCount, cashValue
+        );
+
+        signals.push({
+          company_id:    cid,
+          company_name:  companyName,
+          window_start:  startDate,
+          window_end:    endDate,
+          insiders:      insiderList,
+          insider_count: insiderMap.size,
+          total_value:   Math.round(totalValue),
+          cash_value:    Math.round(cashValue),
+          confidence,
+          rationale,
+        });
+        i = j;
+      } else {
+        i++;
+      }
+    }
+  }
+
+  const meaningful = signals.filter((s) => s.total_value > 0);
+  meaningful.sort((a, b) =>
+    b.window_end.localeCompare(a.window_end) || b.confidence - a.confidence
+  );
+  return meaningful;
+}
 
 // ─── Signal list ──────────────────────────────────────────────────────────────
 
@@ -57,7 +210,7 @@ export function mapToSignalListRow(sig: ClusterSignalWithConfidence): SignalList
 }
 
 export async function getSignalListRows(lookbackDays = 90): Promise<SignalListRow[]> {
-  const signals = await getClusterSignalsWithConfidence(lookbackDays);
+  const signals = await getClusterSignalsServer(lookbackDays);
   return signals.map(mapToSignalListRow);
 }
 
@@ -96,7 +249,7 @@ export async function getSignalDetail(
   companyId: number,
   windowStart: string
 ): Promise<SignalDetailFull | null> {
-  const signals = await getClusterSignalsWithConfidence(90);
+  const signals = await getClusterSignalsServer(90);
   const sig = signals.find(
     (s) => s.company_id === companyId && s.window_start === windowStart
   );
