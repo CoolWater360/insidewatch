@@ -14,6 +14,7 @@
  *                        derivative_transaction.
  */
 
+import { unstable_noStore as noStore } from "next/cache";
 import { getSupabase } from "./supabase";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -147,6 +148,7 @@ function _isSeniorRole(role: string | null, roleCategory: string | null): boolea
 export async function getNetDiscretionaryFlow(
   lookbackDays = 90
 ): Promise<NetDiscretionaryFlow[]> {
+  noStore();
   const supabase = getSupabase();
   if (!supabase) return [];
 
@@ -158,10 +160,10 @@ export async function getNetDiscretionaryFlow(
   type Row = Record<string, any>;
 
   const { data, error } = await supabase
-    .from("transactions")
+    .from("public_transactions")
     .select(
       "company_id, direction, total_value, transaction_type, economic_intent," +
-      " companies(id, name)"
+      " companies:public_companies(id, name)"
     )
     .eq("economic_intent", "discretionary")
     .in("direction", ["buy", "sell"])
@@ -226,6 +228,7 @@ export async function getRepeatBuyerSignals(
   lookbackDays = 90,
   minBuys = 2
 ): Promise<RepeatBuyerSignal[]> {
+  noStore();
   const supabase = getSupabase();
   if (!supabase) return [];
 
@@ -237,11 +240,11 @@ export async function getRepeatBuyerSignals(
   type Row = Record<string, any>;
 
   const { data, error } = await supabase
-    .from("transactions")
+    .from("public_transactions")
     .select(
       "insider_id, company_id, transaction_date, total_value, transaction_type, economic_intent," +
-      " insiders(id, full_name, role, role_category)," +
-      " companies(id, name)"
+      " insiders:public_insiders(id, full_name, role, role_category)," +
+      " companies:public_companies(id, name)"
     )
     .eq("direction", "buy")
     .eq("economic_intent", "discretionary")
@@ -325,6 +328,7 @@ export async function getRepeatBuyerSignals(
 export async function getClusterSignalsWithConfidence(
   lookbackDays = 90
 ): Promise<ClusterSignalWithConfidence[]> {
+  noStore();
   const supabase = getSupabase();
   if (!supabase) return [];
 
@@ -336,11 +340,11 @@ export async function getClusterSignalsWithConfidence(
   type Row = Record<string, any>;
 
   const { data, error } = await supabase
-    .from("transactions")
+    .from("public_transactions")
     .select(
       "company_id, transaction_date, quantity, total_value, transaction_type, economic_intent," +
-      " companies(id, name)," +
-      " insiders(full_name, role, role_category)"
+      " companies:public_companies(id, name)," +
+      " insiders:public_insiders(full_name, role, role_category)"
     )
     .eq("direction", "buy")
     .gte("transaction_date", sinceStr)

@@ -437,3 +437,31 @@ describe("getClusterSignalsWithConfidence", () => {
     expect(s.insiders[0]).toHaveProperty("role_category");
   });
 });
+
+// ─── Public-view regression: no raw table access via anon key ─────────────────
+//
+// These tests assert that each signal function queries public_transactions
+// (not the private transactions table). Anon key has SELECT on public views
+// only; a regression back to "transactions" would break in production.
+
+describe("public-view access regression", () => {
+  beforeEach(() => setMockData([]));
+
+  it("getNetDiscretionaryFlow queries public_transactions", async () => {
+    await getNetDiscretionaryFlow();
+    expect(mockSupabase.from).toHaveBeenCalledWith("public_transactions");
+    expect(mockSupabase.from).not.toHaveBeenCalledWith("transactions");
+  });
+
+  it("getRepeatBuyerSignals queries public_transactions", async () => {
+    await getRepeatBuyerSignals();
+    expect(mockSupabase.from).toHaveBeenCalledWith("public_transactions");
+    expect(mockSupabase.from).not.toHaveBeenCalledWith("transactions");
+  });
+
+  it("getClusterSignalsWithConfidence queries public_transactions", async () => {
+    await getClusterSignalsWithConfidence();
+    expect(mockSupabase.from).toHaveBeenCalledWith("public_transactions");
+    expect(mockSupabase.from).not.toHaveBeenCalledWith("transactions");
+  });
+});
